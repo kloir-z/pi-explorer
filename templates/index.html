@@ -6,7 +6,6 @@
   <title>Git Viewer</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/style.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/diff2html/bundles/css/diff2html.min.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
@@ -20,87 +19,37 @@
     <option value="">&#9733; Favorites</option>
   </select>
   <div class="header-controls">
-    <select id="repo-select"></select>
     <button id="btn-refresh" onclick="refresh()">↻</button>
   </div>
 </div>
 
 <div class="tabs">
-  <div class="tab active" data-tab="overview" onclick="switchTab('overview')">概要</div>
-  <div class="tab" data-tab="log" onclick="switchTab('log')">ログ</div>
-  <div class="tab" data-tab="diff" onclick="switchTab('diff')">差分</div>
   <div class="tab" data-tab="files" onclick="switchTab('files')">ファイル</div>
   <div class="tab" data-tab="listen" onclick="switchTab('listen')">聴取</div>
 </div>
 
 <div class="content" id="content"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/diff2html/bundles/js/diff2html.min.js"></script>
 <script>
-const CODE_DIR = {{ code_dir|tojson }};
+const ROOT_DIR = {{ code_dir|tojson }};
+const ROOT_NAME = {{ root_name|tojson }};
 const ICON_FOLDER = `<svg width="14" height="12" viewBox="0 0 16 14" fill="none" style="vertical-align:-2px;"><path d="M1 2C1 1.45 1.45 1 2 1H6L8 3H14C14.55 3 15 3.45 15 4V12C15 12.55 14.55 13 14 13H2C1.45 13 1 12.55 1 12V2Z" fill="#e8a735" stroke="#c4891e" stroke-width=".5"/><path d="M1 5H15V12C15 12.55 14.55 13 14 13H2C1.45 13 1 12.55 1 12V5Z" fill="#f0c04a"/></svg>`;
 const ICON_FOLDER_OPEN = `<svg width="14" height="12" viewBox="0 0 16 14" fill="none" style="vertical-align:-2px;"><path d="M1 2C1 1.45 1.45 1 2 1H6L8 3H14C14.55 3 15 3.45 15 4V5H3L0 12V2C0 1.45 .45 1 1 1Z" fill="#e8a735" stroke="#c4891e" stroke-width=".5"/><path d="M0 12L3 5H15L12 12H0Z" fill="#f0c04a" stroke="#c4891e" stroke-width=".5"/></svg>`;
 const ICON_FILE = `<svg width="12" height="14" viewBox="0 0 12 14" fill="none" style="vertical-align:-2px;"><path d="M1 1H7L11 5V13H1V1Z" fill="#2d333b" stroke="#545d68" stroke-width=".7"/><path d="M7 1L11 5H7V1Z" fill="#3d444d"/><line x1="3" y1="7" x2="9" y2="7" stroke="#545d68" stroke-width=".5"/><line x1="3" y1="9" x2="9" y2="9" stroke="#545d68" stroke-width=".5"/><line x1="3" y1="11" x2="7" y2="11" stroke="#545d68" stroke-width=".5"/></svg>`;
 const $ = s => document.querySelector(s);
 const $$ = s => document.querySelectorAll(s);
 const content = $('#content');
-const repoSelect = $('#repo-select');
 const favSelect = $('#fav-select');
 
-let repos = [];
-let currentRepo = '';
-let currentTab = 'overview';
-let logData = [];
-let diffFormat = 'line-by-line';
+const TABS = ['files', 'listen'];
+let currentTab = 'files';
+let currentPath = '';  // ROOT-relative directory shown in the Files tab
 let favorites = [];
 
-// --- Change detection polling ---
-let lastCheck = { head: '', changes: -1 };
-let checkTimer = null;
-
-function startChangePolling() {
-  stopChangePolling();
-  pollCheck();
-  checkTimer = setInterval(pollCheck, 10000);
-}
-function stopChangePolling() {
-  if (checkTimer) { clearInterval(checkTimer); checkTimer = null; }
-}
-async function pollCheck() {
-  if (!currentRepo) return;
-  try {
-    const data = await fetchJson(`/api/check?repo=${currentRepo}`);
-    if (lastCheck.head === '' && lastCheck.changes === -1) {
-      lastCheck = { head: data.head, changes: data.changes };
-      return;
-    }
-    if (data.head !== lastCheck.head || data.changes !== lastCheck.changes) {
-      lastCheck = { head: data.head, changes: data.changes };
-      showChangeBadge();
-    }
-  } catch {}
-}
-function showChangeBadge() {
-  if (document.getElementById('change-badge')) return;
-  const badge = document.createElement('span');
-  badge.id = 'change-badge';
-  badge.textContent = '更新あり';
-  badge.className = 'change-badge';
-  badge.onclick = () => { badge.remove(); renderTab(); };
-  const header = document.querySelector('.header-controls') || document.querySelector('.header');
-  if (header) header.appendChild(badge);
-}
-function resetChangeState() {
-  lastCheck = { head: '', changes: -1 };
-  const badge = document.getElementById('change-badge');
-  if (badge) badge.remove();
-}
-
 // --- State persistence ---
-const STATE_KEY = 'gitviewer_state';
+const STATE_KEY = 'explorer_state';
 function saveState() {
   localStorage.setItem(STATE_KEY, JSON.stringify({
-    repo: currentRepo,
     tab: currentTab,
     path: currentPath,
   }));
@@ -109,62 +58,57 @@ function loadState() {
   try { return JSON.parse(localStorage.getItem(STATE_KEY)) || {}; } catch { return {}; }
 }
 
-// --- Init ---
-function buildRepoOptions(repoList) {
-  const uncategorized = repoList.filter(r => !r.category);
-  const categories = {};
-  for (const r of repoList) {
-    if (r.category) {
-      if (!categories[r.category]) categories[r.category] = [];
-      categories[r.category].push(r);
+// One-time move of the git-viewer era keys, which stored a repo name next to
+// a repo-relative path, into the ROOT-relative layout.
+function migrateLegacyStorage() {
+  const take = k => { const v = localStorage.getItem(k); localStorage.removeItem(k); return v; };
+  const joinPath = (...parts) => parts.filter(Boolean).join('/');
+  try {
+    const st = JSON.parse(take('gitviewer_state') || 'null');
+    if (st && localStorage.getItem(STATE_KEY) === null) {
+      localStorage.setItem(STATE_KEY, JSON.stringify({
+        tab: TABS.includes(st.tab) ? st.tab : 'files',
+        path: joinPath(st.repo, st.path),
+      }));
     }
-  }
-  let html = uncategorized.map(r =>
-    `<option value="${r.name}">${r.name}</option>`
-  ).join('');
-  for (const cat of Object.keys(categories).sort()) {
-    html += `<optgroup label="${cat}">`;
-    html += categories[cat].map(r =>
-      `<option value="${r.name}">${r.name.split('/').pop()}</option>`
-    ).join('');
-    html += `</optgroup>`;
-  }
-  return html;
+    const sortDefault = take('gitviewer_tree_sort_default');
+    if (sortDefault && localStorage.getItem(SORT_DEFAULT_KEY) === null) {
+      localStorage.setItem(SORT_DEFAULT_KEY, sortDefault);
+    }
+    const sortByDir = JSON.parse(take('gitviewer_tree_sort_by_dir') || 'null');
+    if (sortByDir && localStorage.getItem(SORT_BY_DIR_KEY) === null) {
+      const out = {};
+      for (const [k, v] of Object.entries(sortByDir)) {
+        const i = k.indexOf('|');
+        out[i < 0 ? k : joinPath(k.slice(0, i), k.slice(i + 1))] = v;
+      }
+      localStorage.setItem(SORT_BY_DIR_KEY, JSON.stringify(out));
+    }
+    take('gitviewer_listen_collapsed');  // group keys were repo-relative; drop
+  } catch {}
 }
 
+// --- Favorites ---
 function buildFavOptions() {
   let html = '<option value="">&#9733; Favorites</option>';
   for (const fav of favorites) {
-    let label = fav;
-    for (const r of repos) {
-      if (fav.startsWith(r.name + '/')) {
-        const dirPath = fav.substring(r.name.length + 1);
-        label = r.name + ' / ' + dirPath;
-        break;
-      }
-      if (fav === r.name) {
-        label = r.name;
-        break;
-      }
-    }
-    html += `<option value="${esc(fav)}">${esc(label)}</option>`;
+    html += `<option value="${esc(fav)}">${esc(fav.split('/').join(' / '))}</option>`;
   }
   favSelect.innerHTML = html;
 }
 
-async function toggleFavorite(event, repoName, dirPath) {
+async function toggleFavorite(event, dirPath) {
   event.stopPropagation();
-  const favKey = repoName + '/' + dirPath;
-  const isFav = favorites.includes(favKey);
+  const isFav = favorites.includes(dirPath);
   await fetch('/api/favorites', {
     method: isFav ? 'DELETE' : 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({path: favKey}),
+    body: JSON.stringify({path: dirPath}),
   });
   if (isFav) {
-    favorites = favorites.filter(f => f !== favKey);
+    favorites = favorites.filter(f => f !== dirPath);
   } else {
-    favorites.push(favKey);
+    favorites.push(dirPath);
   }
   buildFavOptions();
   renderFiles();
@@ -172,66 +116,28 @@ async function toggleFavorite(event, repoName, dirPath) {
 
 function jumpToFavorite(fav) {
   if (!fav) return;
-  for (const r of repos) {
-    if (fav.startsWith(r.name + '/') || fav === r.name) {
-      const dirPath = fav.startsWith(r.name + '/') ? fav.substring(r.name.length + 1) : '';
-      currentRepo = r.name;
-      repoSelect.value = currentRepo;
-      currentTab = 'files';
-      $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'files'));
-      renderFiles(dirPath);
-      return;
-    }
-  }
+  currentTab = 'files';
+  $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'files'));
+  renderFiles(fav);
 }
 
+// --- Init ---
 async function init() {
+  migrateLegacyStorage();
   const saved = loadState();
-  if (saved.tab && ['overview','log','diff','files','listen'].includes(saved.tab)) {
-    currentTab = saved.tab;
-    $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === currentTab));
-  }
+  if (TABS.includes(saved.tab)) currentTab = saved.tab;
+  $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === currentTab));
   if (saved.path) currentPath = saved.path;
 
-  repoSelect.onchange = () => { currentRepo = repoSelect.value; currentPath = ''; saveState(); resetChangeState(); startChangePolling(); renderTab(); };
-
-  // Kick off /api/repos in background (slow on Windows), render saved repo immediately.
-  const reposPromise = fetchJson('/api/repos');
   const favsPromise = fetchJson('/api/favorites');
   const navDirsPromise = fetchJson('/api/nav_direction').catch(() => ({}));
-
-  if (saved.repo) {
-    currentRepo = saved.repo;
-    startChangePolling();
-    renderTab();
-  }
-
-  repos = await reposPromise;
+  renderTab();
   favorites = await favsPromise;
   navDirections = await navDirsPromise || {};
-  repoSelect.innerHTML = buildRepoOptions(repos);
   buildFavOptions();
-
-  const repoNames = repos.map(r => r.name);
-  if (!currentRepo || !repoNames.includes(currentRepo)) {
-    currentRepo = repos[0]?.name || '';
-    if (currentRepo) {
-      startChangePolling();
-      renderTab();
-    }
-  }
-  repoSelect.value = currentRepo;
 }
 
-async function refresh() {
-  repos = await fetchJson('/api/repos');
-  repoSelect.innerHTML = buildRepoOptions(repos);
-  const repoNames = repos.map(r => r.name);
-  if (!repoNames.includes(currentRepo) && repos.length > 0) {
-    currentRepo = repos[0].name;
-  }
-  repoSelect.value = currentRepo;
-  saveState();
+function refresh() {
   renderTab();
 }
 
@@ -246,42 +152,45 @@ async function fetchJson(url) {
 // --- Tabs ---
 function switchTab(tab) {
   currentTab = tab;
-  if (tab !== 'files') currentPath = '';
   $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
   saveState();
   renderTab();
 }
 
 async function renderTab() {
-  if (!currentRepo) { content.innerHTML = '<div class="diff-empty">リポジトリがありません</div>'; return; }
   clearBlobUi();
-  if (currentTab === 'overview') await renderOverview();
-  else if (currentTab === 'log') await renderLog();
-  else if (currentTab === 'diff') await renderDiff();
-  else if (currentTab === 'files') await renderFiles();
+  if (currentTab === 'files') await renderFiles();
   else if (currentTab === 'listen') await renderListen();
 }
 
 // --- Listen (playback overview dashboard) ---
-// 全 output.mp3 の再生ログ (.playback.jsonl) をサーバ側で集約し、どれをどこまで
-// 聞いたかを横断一覧する。カバレッジ% (聴いた区間の合計) と到達% (最遠到達) を併記。
+// ファイルタブで開いているフォルダ以下の全 output.mp3 の再生ログ (.playback.jsonl) を
+// サーバ側で集約し、どれをどこまで聞いたかを横断一覧する。カバレッジ% (聴いた区間の
+// 合計) と到達% (最遠到達) を併記。
+const LISTEN_COLLAPSED_KEY = 'explorer_listen_collapsed';
 let listenItems = [];
+let listenScope = '';
 let listenFilter = 'all';
 let listenSort = 'name';
 
 // 大フォルダー = プロジェクトフォルダの親 (projects 直下 / books / books/<series>)。
+// 表示名は走査起点からの相対パス (起点がルートなら "irodori_studio/projects" など)。
 function listenGroupKey(it) { return it.dir.split('/').slice(0, -1).join('/'); }
-function listenGroupLabel(key) { const seg = key.split('/'); return seg[seg.length - 1] || key; }
+function listenGroupLabel(key) {
+  const base = listenScope ? listenScope + '/' : '';
+  const rel = key.startsWith(base) ? key.slice(base.length) : key;
+  return rel || listenScope.split('/').pop() || ROOT_NAME;
+}
 
 // グループの折り畳み状態は localStorage に保持 (再描画・再訪でも維持)。
 function getListenCollapsed() {
-  try { return new Set(JSON.parse(localStorage.getItem('gitviewer_listen_collapsed')) || []); }
+  try { return new Set(JSON.parse(localStorage.getItem(LISTEN_COLLAPSED_KEY)) || []); }
   catch { return new Set(); }
 }
 function toggleListenGroup(key) {
   const c = getListenCollapsed();
   c.has(key) ? c.delete(key) : c.add(key);
-  localStorage.setItem('gitviewer_listen_collapsed', JSON.stringify([...c]));
+  localStorage.setItem(LISTEN_COLLAPSED_KEY, JSON.stringify([...c]));
   renderListenView();
 }
 
@@ -317,8 +226,9 @@ function listenStatus(it) {
 }
 
 async function renderListen() {
-  content.innerHTML = '<div class="diff-empty">読み込み中…</div>';
-  const items = await fetchJson(`/api/playback-overview?repo=${currentRepo}`);
+  content.innerHTML = '<div class="empty-msg">読み込み中…</div>';
+  listenScope = currentPath;
+  const items = await fetchJson(`/api/playback-overview?path=${encodeURIComponent(listenScope)}`);
   listenItems = Array.isArray(items) ? items : [];
   renderListenView();
 }
@@ -364,7 +274,7 @@ function listenRowHtml(it) {
 
 function renderListenView() {
   if (listenItems.length === 0) {
-    content.innerHTML = '<div class="diff-empty">このリポジトリに音声 (output.mp3) はありません</div>';
+    content.innerHTML = `<div class="empty-msg">${esc(listenScopeLabel())} 以下に音声 (output.mp3) はありません</div>`;
     return;
   }
   const counts = { all: listenItems.length, unlistened: 0, progress: 0, done: 0 };
@@ -392,7 +302,7 @@ function renderListenView() {
   const opt = (key, label) => `<option value="${key}"${listenSort === key ? ' selected' : ''}>${label}</option>`;
 
   content.innerHTML = `
-    <div class="listen-summary">全 ${counts.all} 本 · 未聴 ${counts.unlistened} · 途中 ${counts.progress} · 完聴 ${counts.done} · 合計聴取 ${fmtDur(totalCovered)}</div>
+    <div class="listen-summary">${esc(listenScopeLabel())} · 全 ${counts.all} 本 · 未聴 ${counts.unlistened} · 途中 ${counts.progress} · 完聴 ${counts.done} · 合計聴取 ${fmtDur(totalCovered)}</div>
     <div class="listen-toolbar">
       <div class="listen-filters">
         ${chip('all', 'すべて')}${chip('unlistened', '未聴')}${chip('progress', '途中')}${chip('done', '完聴')}
@@ -401,7 +311,11 @@ function renderListenView() {
         ${opt('name', '名前順')}${opt('recent', '新しい順')}${opt('played', '最終再生順')}${opt('unlistenedFirst', '未聴・低カバレッジ順')}
       </select>
     </div>
-    ${body || '<div class="diff-empty">該当なし</div>'}`;
+    ${body || '<div class="empty-msg">該当なし</div>'}`;
+}
+
+function listenScopeLabel() {
+  return [ROOT_NAME, ...listenScope.split('/').filter(Boolean)].join(' / ');
 }
 
 function setListenFilter(f) { listenFilter = f; renderListenView(); }
@@ -417,146 +331,11 @@ async function openAudioFromOverview(dir, audio) {
   if (player) player.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
-// --- Overview ---
-async function renderOverview() {
-  const [logs, diffData, branchData, info] = await Promise.all([
-    fetchJson(`/api/log?repo=${currentRepo}&limit=5`),
-    fetchJson(`/api/diff?repo=${currentRepo}`),
-    fetchJson(`/api/branches?repo=${currentRepo}`),
-    fetchJson(`/api/info?repo=${currentRepo}`),
-  ]);
-  if (!info || !info.branch) return;
-  const files = diffData.files || [];
-  const branches = branchData || [];
-
-  content.innerHTML = `
-    <div class="status-bar">
-      <span><span class="label">branch:</span> <span class="val-branch">${info.branch}</span></span>
-      <span><span class="label">changes:</span> <span class="val-changes">${info.changes} files</span></span>
-      <span><span class="label">latest:</span> <span class="val-time">${timeAgo(info.latest_time)}</span></span>
-      <span><span class="label">remote:</span> <span class="val-remote">${info.remote_status}</span></span>
-    </div>
-    ${branches.length > 1 ? `
-      <div class="section-header">branches</div>
-      <div class="list-box">${branches.map(b => `
-        <div class="list-row${b.current ? ' branch-current' : ''}">
-          <span class="branch-icon">${b.current ? '●' : '○'}</span>
-          <span class="branch-name">${esc(b.name)}</span>
-          <span class="commit-hash">${b.hash}</span>
-          ${b.upstream ? `<span class="commit-time">${esc(b.upstream)}</span>` : ''}
-        </div>
-      `).join('')}</div>
-    ` : ''}
-    ${files.length > 0 ? `
-      <div class="section-header">changes</div>
-      <div class="list-box">${files.map((f, i) => `
-        <div class="list-row clickable" onclick="toggleFileDiff(this, '${esc(f)}', 'ov-diff-${i}')">
-          <span class="badge-m">M</span><span>${esc(f)}</span>
-        </div>
-        <div class="diff-inline" id="ov-diff-${i}" style="display:none;"></div>
-      `).join('')}</div>
-    ` : ''}
-    <div class="section-header">recent commits</div>
-    <div class="list-box">${logs.map(c => `
-      <div class="list-row">
-        <span class="commit-hash">${c.hash}</span>
-        <span class="commit-msg">${esc(c.message)}</span>
-        <span class="commit-time">${timeAgo(c.time)}</span>
-      </div>
-    `).join('')}</div>
-  `;
-}
-
-// --- Log ---
-async function renderLog() {
-  logData = await fetchJson(`/api/log?repo=${currentRepo}&limit=50`);
-
-  content.innerHTML = `
-    <div class="list-box">${logData.map((c, i) => `
-      <div class="list-row clickable" onclick="toggleCommitDiff(this, '${c.hash}', ${i})">
-        <span class="commit-hash">${c.hash}</span>
-        <span class="commit-msg">${esc(c.message)}</span>
-        <span class="commit-stat">${c.files_changed > 0 ? `${c.files_changed}f <span class="stat-add">+${c.insertions}</span> <span class="stat-del">-${c.deletions}</span>` : ''}</span>
-        <span class="commit-time">${timeAgo(c.time)}</span>
-      </div>
-      <div class="diff-inline" id="diff-${i}" style="display:none;"></div>
-    `).join('')}</div>
-  `;
-}
-
-async function toggleCommitDiff(row, hash, idx) {
-  const el = document.getElementById(`diff-${idx}`);
-  if (el.style.display !== 'none') {
-    el.style.display = 'none';
-    return;
-  }
-  el.innerHTML = '<div style="padding:4px 8px;color:var(--text-muted);">Loading...</div>';
-  el.style.display = 'block';
-
-  const data = await fetchJson(`/api/diff?repo=${currentRepo}&commit=${hash}`);
-  if (data.diff) {
-    el.innerHTML = `<div class="diff-toolbar"><button class="diff-toggle" onclick="event.stopPropagation(); toggleDiffFormat(this, '${hash}', ${idx})">⇄ ${diffFormat === 'line-by-line' ? 'side-by-side' : 'line-by-line'}</button></div><div class="diff-container">${renderDiffHtml(data.diff)}</div>`;
-  } else {
-    el.innerHTML = '<div class="diff-empty">差分なし</div>';
-  }
-}
-
-async function toggleDiffFormat(btn, hash, idx) {
-  diffFormat = diffFormat === 'line-by-line' ? 'side-by-side' : 'line-by-line';
-  const el = document.getElementById(`diff-${idx}`);
-  const data = await fetchJson(`/api/diff?repo=${currentRepo}&commit=${hash}`);
-  if (data.diff) {
-    el.innerHTML = `<div class="diff-toolbar"><button class="diff-toggle" onclick="event.stopPropagation(); toggleDiffFormat(this, '${hash}', ${idx})">⇄ ${diffFormat === 'line-by-line' ? 'side-by-side' : 'line-by-line'}</button></div><div class="diff-container">${renderDiffHtml(data.diff)}</div>`;
-  }
-}
-
-function toggleWorkingDiffFormat() {
-  diffFormat = diffFormat === 'line-by-line' ? 'side-by-side' : 'line-by-line';
-  renderDiff();
-}
-
-// --- Diff (working tree) ---
-async function renderDiff() {
-  const data = await fetchJson(`/api/diff?repo=${currentRepo}`);
-
-  if (!data.diff) {
-    content.innerHTML = '<div class="diff-empty">未コミットの変更はありません</div>';
-    return;
-  }
-
-  content.innerHTML = `
-    <div style="display:flex;justify-content:space-between;align-items:center;">
-      <div class="section-header" style="margin:0;">uncommitted changes (${(data.files || []).length} files)</div>
-      <button class="diff-toggle" onclick="toggleWorkingDiffFormat()">⇄ ${diffFormat === 'line-by-line' ? 'side-by-side' : 'line-by-line'}</button>
-    </div>
-    <div class="diff-container">${renderDiffHtml(data.diff)}</div>
-  `;
-}
-
-// --- File diff toggle (overview changes) ---
-async function toggleFileDiff(row, filePath, elId) {
-  const el = document.getElementById(elId);
-  if (el.style.display !== 'none') {
-    el.style.display = 'none';
-    return;
-  }
-  el.innerHTML = '<div style="padding:4px 8px;color:var(--text-muted);">Loading...</div>';
-  el.style.display = 'block';
-
-  const data = await fetchJson(`/api/diff?repo=${currentRepo}&file=${encodeURIComponent(filePath)}`);
-  if (data.diff) {
-    el.innerHTML = `<div class="diff-container">${renderDiffHtml(data.diff)}</div>`;
-  } else {
-    el.innerHTML = '<div class="diff-empty">差分なし</div>';
-  }
-}
-
 // --- Files tab ---
-let currentPath = '';
 
 // --- File sort: per-directory + global default ---
-const SORT_DEFAULT_KEY = 'gitviewer_tree_sort_default';
-const SORT_BY_DIR_KEY = 'gitviewer_tree_sort_by_dir';
+const SORT_DEFAULT_KEY = 'explorer_tree_sort_default';
+const SORT_BY_DIR_KEY = 'explorer_tree_sort_by_dir';
 const SORT_KEY_LABELS = { name: 'Name', mtime: 'Modified', type: 'Type' };
 const SORT_KEY_ORDER = ['name', 'mtime', 'type'];
 const DEFAULT_SORT_CONFIG = { keys: [{ key: 'name', dir: 'asc' }], foldersFirst: true };
@@ -574,26 +353,24 @@ function _readSortByDir() {
 function _writeSortByDir(map) {
   localStorage.setItem(SORT_BY_DIR_KEY, JSON.stringify(map));
 }
-function _sortDirKey(repo, dir) { return `${repo}|${dir}`; }
 
-function getSortConfig(repo, dir) {
+function getSortConfig(dir) {
   const map = _readSortByDir();
-  const k = _sortDirKey(repo, dir);
-  if (map[k] && Array.isArray(map[k].keys) && map[k].keys.length > 0) return map[k];
+  if (map[dir] && Array.isArray(map[dir].keys) && map[dir].keys.length > 0) return map[dir];
   return _readSortDefault();
 }
-function isDirSortOverridden(repo, dir) {
+function isDirSortOverridden(dir) {
   const map = _readSortByDir();
-  return !!map[_sortDirKey(repo, dir)];
+  return !!map[dir];
 }
-function saveSortConfigForDir(repo, dir, cfg) {
+function saveSortConfigForDir(dir, cfg) {
   const map = _readSortByDir();
-  map[_sortDirKey(repo, dir)] = cfg;
+  map[dir] = cfg;
   _writeSortByDir(map);
 }
-function clearSortConfigForDir(repo, dir) {
+function clearSortConfigForDir(dir) {
   const map = _readSortByDir();
-  delete map[_sortDirKey(repo, dir)];
+  delete map[dir];
   _writeSortByDir(map);
 }
 function saveSortDefault(cfg) {
@@ -644,7 +421,7 @@ function toggleSortPopover(ev) {
 }
 
 function openSortPopover(anchorEl) {
-  _sortPopoverEditing = JSON.parse(JSON.stringify(getSortConfig(currentRepo, currentPath)));
+  _sortPopoverEditing = JSON.parse(JSON.stringify(getSortConfig(currentPath)));
   const pop = document.createElement('div');
   pop.id = 'sort-popover';
   pop.className = 'sort-popover';
@@ -695,7 +472,7 @@ function renderSortPopover() {
   const cfg = _sortPopoverEditing;
   const used = new Set(cfg.keys.map(k => k.key));
   const unused = SORT_KEY_ORDER.filter(k => !used.has(k));
-  const overridden = isDirSortOverridden(currentRepo, currentPath);
+  const overridden = isDirSortOverridden(currentPath);
 
   const rows = cfg.keys.map((k, i) => `
     <div class="sort-priority-row">
@@ -733,7 +510,7 @@ function renderSortPopover() {
 
 function _afterSortChange() {
   // Auto-save: while popover is open, any edit applies to current dir immediately.
-  saveSortConfigForDir(currentRepo, currentPath, _sortPopoverEditing);
+  saveSortConfigForDir(currentPath, _sortPopoverEditing);
   renderSortPopover();
   rerenderFilesFromCache();
 }
@@ -775,20 +552,20 @@ function setFoldersFirst(checked) {
 }
 function applySortToDir() {
   if (!_sortPopoverEditing) return;
-  saveSortConfigForDir(currentRepo, currentPath, _sortPopoverEditing);
+  saveSortConfigForDir(currentPath, _sortPopoverEditing);
   renderSortPopover();
   rerenderFilesFromCache();
 }
 function applySortAsDefault() {
   if (!_sortPopoverEditing) return;
   saveSortDefault(_sortPopoverEditing);
-  clearSortConfigForDir(currentRepo, currentPath);
+  clearSortConfigForDir(currentPath);
   renderSortPopover();
   rerenderFilesFromCache();
 }
 function resetSortForDir() {
-  clearSortConfigForDir(currentRepo, currentPath);
-  _sortPopoverEditing = JSON.parse(JSON.stringify(getSortConfig(currentRepo, currentPath)));
+  clearSortConfigForDir(currentPath);
+  _sortPopoverEditing = JSON.parse(JSON.stringify(getSortConfig(currentPath)));
   renderSortPopover();
   rerenderFilesFromCache();
 }
@@ -797,18 +574,18 @@ async function renderFiles(path) {
   clearBlobUi();
   if (path !== undefined) currentPath = path;
   saveState();
-  const entries = await fetchJson(`/api/tree?repo=${currentRepo}&path=${encodeURIComponent(currentPath)}`);
-  if (Array.isArray(entries)) lastDirFetch = { key: `${currentRepo}|${currentPath}`, entries };
+  const entries = await fetchJson(`/api/tree?path=${encodeURIComponent(currentPath)}`);
+  if (Array.isArray(entries)) lastDirFetch = { key: currentPath, entries };
 
   renderFilesView(entries);
 }
 
 function renderFilesView(entries) {
   const breadcrumb = buildBreadcrumb(currentPath);
-  const sortCfg = getSortConfig(currentRepo, currentPath);
+  const sortCfg = getSortConfig(currentPath);
   const sorted = Array.isArray(entries) ? sortEntries(entries, sortCfg) : [];
   const sortLabel = formatSortLabel(sortCfg);
-  const overridden = isDirSortOverridden(currentRepo, currentPath);
+  const overridden = isDirSortOverridden(currentPath);
 
   content.innerHTML = `
     <div class="section-header" style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
@@ -823,8 +600,8 @@ function renderFilesView(entries) {
         const t = formatMtime(e.mtime);
         const time = t ? `<span class="file-mtime">${t}</span>` : '';
         if (e.type === 'tree') {
-          const isFav = favorites.includes(currentRepo + '/' + e.path);
-          return `<div class="list-row clickable" onclick="renderFiles('${esc(e.path)}')"><span class="tree-icon">${ICON_FOLDER}</span><span class="file-name">${esc(e.name)}</span>${time}<span class="fav-star ${isFav ? 'active' : ''}" onclick="toggleFavorite(event, currentRepo, '${esc(e.path)}')">${isFav ? '★' : '☆'}</span></div>`;
+          const isFav = favorites.includes(e.path);
+          return `<div class="list-row clickable" onclick="renderFiles('${esc(e.path)}')"><span class="tree-icon">${ICON_FOLDER}</span><span class="file-name">${esc(e.name)}</span>${time}<span class="fav-star ${isFav ? 'active' : ''}" onclick="toggleFavorite(event, '${esc(e.path)}')">${isFav ? '★' : '☆'}</span></div>`;
         }
         return `<div class="list-row clickable" data-blob-path="${esc(e.path)}" onclick="showBlob('${esc(e.path)}')"><span class="tree-icon">${ICON_FILE}</span><span class="file-name">${esc(e.name)}</span>${time}</div>`;
       }).join('')}
@@ -857,7 +634,7 @@ function formatSortLabel(cfg) {
 }
 
 function rerenderFilesFromCache() {
-  const key = `${currentRepo}|${currentPath}`;
+  const key = currentPath;
   if (lastDirFetch.key === key && Array.isArray(lastDirFetch.entries)) {
     renderFilesView(lastDirFetch.entries);
   } else {
@@ -866,7 +643,7 @@ function rerenderFilesFromCache() {
 }
 
 function buildBreadcrumb(path) {
-  let html = `<span class="clickable" onclick="renderFiles('')" style="cursor:pointer;color:var(--accent);">${currentRepo}</span>`;
+  let html = `<span class="clickable" onclick="renderFiles('')" style="cursor:pointer;color:var(--accent);">${esc(ROOT_NAME)}</span>`;
   if (path) {
     const parts = path.split('/');
     let acc = '';
@@ -899,7 +676,7 @@ function resolveMdAssetUrl(url, baseDir) {
   }
   const normalized = parts.join('/');
   if (!normalized) return url;
-  return `/api/blob?repo=${encodeURIComponent(currentRepo)}&path=${encodeURIComponent(normalized)}`;
+  return `/api/blob?path=${encodeURIComponent(normalized)}`;
 }
 
 function rewriteMdAssets(container, baseDir) {
@@ -1011,7 +788,7 @@ async function loadSiblingSrt(audioPath) {
   const candidates = [dir + stem + '.srt', dir + base + '.srt'];
   for (const p of candidates) {
     const data = await fetchJson(
-      `/api/blob?repo=${encodeURIComponent(currentRepo)}&path=${encodeURIComponent(p)}`
+      `/api/blob?path=${encodeURIComponent(p)}`
     );
     if (data && typeof data.content === 'string') return { path: p, text: data.content };
   }
@@ -1163,7 +940,7 @@ async function loadSiblingChapters(audioPath) {
   const slash = audioPath.lastIndexOf('/');
   const dir = slash >= 0 ? audioPath.slice(0, slash + 1) : '';
   const data = await fetchJson(
-    `/api/blob?repo=${encodeURIComponent(currentRepo)}&path=${encodeURIComponent(dir + 'chapters.json')}`
+    `/api/blob?path=${encodeURIComponent(dir + 'chapters.json')}`
   );
   if (data && typeof data.content === 'string') {
     try {
@@ -1288,7 +1065,7 @@ async function setupChapterNav(audioPath) {
 // --- Bookmark helpers ---
 async function fetchBookmark(path) {
   try {
-    const r = await fetch(`/api/bookmark?repo=${encodeURIComponent(currentRepo)}&path=${encodeURIComponent(path)}`);
+    const r = await fetch(`/api/bookmark?path=${encodeURIComponent(path)}`);
     if (!r.ok) return {};
     return await r.json();
   } catch {
@@ -1301,7 +1078,7 @@ async function setBookmark(path, type, index) {
     const r = await fetch('/api/bookmark', {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({repo: currentRepo, path, type, index}),
+      body: JSON.stringify({path, type, index}),
     });
     if (!r.ok) alert('しおりの保存に失敗しました');
   } catch {
@@ -1314,7 +1091,7 @@ async function deleteBookmark(path) {
     const r = await fetch('/api/bookmark', {
       method: 'DELETE',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({repo: currentRepo, path}),
+      body: JSON.stringify({path}),
     });
     if (!r.ok) alert('しおりの削除に失敗しました');
   } catch {
@@ -1601,10 +1378,10 @@ let currentBlobPath = '';
 let currentBlobSiblings = [];
 let currentBlobIdx = -1;
 let lastDirFetch = { key: '', entries: null };
-let navDirections = {}; // { "repo|dir|ext": "reversed" } — absent = normal
+let navDirections = {}; // { "dir|ext": "reversed" } — absent = normal
 
 function navDirKey(path) {
-  return `${currentRepo}|${getBlobDir(path)}|${getExt(path)}`;
+  return `${getBlobDir(path)}|${getExt(path)}`;
 }
 function isNavReversed(path) {
   return navDirections[navDirKey(path)] === 'reversed';
@@ -1643,10 +1420,10 @@ function isHtmlExt(ext) {
   return ext === 'html' || ext === 'htm';
 }
 
-// Build a /raw/ URL that mirrors the repo's on-disk layout so the rendered
+// Build a /raw/ URL that mirrors the on-disk layout so the rendered
 // page's relative CSS/JS/image references resolve against sibling /raw/ URLs.
 function rawUrl(path) {
-  const segs = (currentRepo + '/' + path).split('/').filter(Boolean).map(encodeURIComponent);
+  const segs = path.split('/').filter(Boolean).map(encodeURIComponent);
   return '/raw/' + segs.join('/');
 }
 
@@ -1669,14 +1446,14 @@ function htmlSourceHeaderExtras(path, ext) {
 async function loadSiblings(path) {
   const dir = getBlobDir(path);
   const ext = getExt(path);
-  const key = `${currentRepo}|${dir}`;
+  const key = dir;
   let entries = (lastDirFetch.key === key) ? lastDirFetch.entries : null;
   if (!entries) {
-    entries = await fetchJson(`/api/tree?repo=${currentRepo}&path=${encodeURIComponent(dir)}`);
+    entries = await fetchJson(`/api/tree?path=${encodeURIComponent(dir)}`);
     if (Array.isArray(entries)) lastDirFetch = { key, entries };
   }
   if (!Array.isArray(entries)) return { siblings: [], idx: -1 };
-  const sorted = sortEntries(entries, getSortConfig(currentRepo, dir));
+  const sorted = sortEntries(entries, getSortConfig(dir));
   const siblings = sorted
     .filter(e => e.type === 'blob' && getExt(e.path) === ext)
     .map(e => e.path);
@@ -1794,7 +1571,7 @@ async function showBlob(path) {
   }, 1500);
 
   const ext = path.includes('.') ? path.split('.').pop().toLowerCase() : '';
-  const blobUrl = `/api/blob?repo=${currentRepo}&path=${encodeURIComponent(path)}`;
+  const blobUrl = `/api/blob?path=${encodeURIComponent(path)}`;
   const fileName = path.split('/').pop();
 
   // Common preview UI: edit FAB, list highlight, sibling navigation zones
@@ -1816,7 +1593,7 @@ async function showBlob(path) {
   if (!IMAGE_EXTS.includes(ext) && !PDF_EXTS.includes(ext) && !AUDIO_EXTS.includes(ext) && !VIDEO_EXTS.includes(ext) && !TEXT_EXTS.includes(ext) && ext !== '') {
     blobView.innerHTML = `
       <div class="section-header" style="margin-top:8px;">${esc(path)}${copyPathBtn(path)}<span id="nav-dir-toggle-slot"></span></div>
-      <div class="diff-empty">バイナリファイル — <a href="${blobUrl}" download style="color:var(--accent);">ダウンロード</a></div>`;
+      <div class="empty-msg">バイナリファイル — <a href="${blobUrl}" download style="color:var(--accent);">ダウンロード</a></div>`;
     return;
   }
 
@@ -1885,7 +1662,7 @@ async function showBlob(path) {
     return;
   }
 
-  // HTML — render as a webpage in an iframe. The /raw/ URL mirrors the repo's
+  // HTML — render as a webpage in an iframe. The /raw/ URL mirrors the
   // directory layout, so relative CSS/JS/images resolve. "新しいタブで開く"
   // gives a clean full-screen view (handy on mobile). Toggle to view source.
   if (isHtmlExt(ext) && !htmlSourceMode) {
@@ -1903,7 +1680,7 @@ async function showBlob(path) {
   // Text / Code / Markdown
   const data = await fetchJson(blobUrl);
   if (data.content === undefined) {
-    blobView.innerHTML = '<div class="diff-empty">ファイルを表示できません</div>';
+    blobView.innerHTML = '<div class="empty-msg">ファイルを表示できません</div>';
     return;
   }
 
@@ -1975,7 +1752,7 @@ async function showBlob(path) {
     if (cues.length === 0) {
       blobView.innerHTML = `
         <div class="section-header" style="margin-top:8px;">${esc(path)}${copyPathBtn(path)}<span id="nav-dir-toggle-slot"></span></div>
-        <div class="diff-empty">字幕を読み込めませんでした</div>
+        <div class="empty-msg">字幕を読み込めませんでした</div>
         <pre class="blob-container" style="padding:8px;white-space:pre-wrap;">${esc(data.content)}</pre>`;
       renderNavDirToggle();
       return;
@@ -2116,10 +1893,10 @@ async function editBlob(path) {
   clearBlobNavZones();
   clearNavDirToggle();
   editingPath = path;
-  const blobUrl = `/api/blob?repo=${currentRepo}&path=${encodeURIComponent(path)}`;
+  const blobUrl = `/api/blob?path=${encodeURIComponent(path)}`;
   const data = await fetchJson(blobUrl);
   if (data.content === undefined) {
-    blobView.innerHTML = '<div class="diff-empty">ファイルを編集できません</div>';
+    blobView.innerHTML = '<div class="empty-msg">ファイルを編集できません</div>';
     return;
   }
 
@@ -2149,28 +1926,13 @@ async function saveBlob() {
   const res = await fetch('/api/blob', {
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({repo: currentRepo, path: editingPath, content: ta.value}),
+    body: JSON.stringify({path: editingPath, content: ta.value}),
   });
 
   if (res.ok) {
     showBlob(editingPath);
   } else {
     alert('保存に失敗しました');
-  }
-}
-
-// --- Helpers ---
-function renderDiffHtml(diffText) {
-  try {
-    return Diff2Html.html(diffText, {
-      drawFileList: false,
-      matching: 'lines',
-      outputFormat: diffFormat,
-      diffStyle: 'word',
-      colorScheme: 'dark',
-    });
-  } catch {
-    return `<pre style="padding:8px;color:var(--text);white-space:pre-wrap;">${esc(diffText)}</pre>`;
   }
 }
 
@@ -2193,8 +1955,8 @@ function esc(s) {
 }
 
 function absolutePathFor(path) {
-  const sep = CODE_DIR.includes('\\') ? '\\' : '/';
-  const joined = CODE_DIR + '/' + currentRepo + '/' + path;
+  const sep = ROOT_DIR.includes('\\') ? '\\' : '/';
+  const joined = ROOT_DIR + '/' + path;
   return joined.replace(/[\\\/]+/g, sep);
 }
 
@@ -2258,7 +2020,7 @@ async function refreshPlaybackLog(audioPath) {
   const container = document.getElementById('playback-log-list');
   if (!container) return;
   const hadRows = !!container.querySelector('.playback-log-rows');
-  const url = `/api/playback-log?repo=${encodeURIComponent(currentRepo)}&path=${encodeURIComponent(audioPath)}`;
+  const url = `/api/playback-log?path=${encodeURIComponent(audioPath)}`;
   try {
     const records = await fetchJson(url);
     if (!Array.isArray(records) || records.length === 0) {
@@ -2325,7 +2087,6 @@ function setupPlaybackLog(audioPath) {
     const endSec = lastTime;
     if (endSec - startCopy < PLAYBACK_MIN_SECONDS) return;
     const body = JSON.stringify({
-      repo: currentRepo,
       path: audioPath,
       start_sec: startCopy,
       end_sec: endSec,
@@ -2451,7 +2212,7 @@ init();
 let notesState = { path: null, mtime: null, kind: null, resolved: [], unresolved: [] };
 
 async function fetchNotes(path) {
-  const url = `/api/notes?repo=${encodeURIComponent(currentRepo)}&path=${encodeURIComponent(path)}`;
+  const url = `/api/notes?path=${encodeURIComponent(path)}`;
   try {
     const resp = await fetch(url);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -2473,7 +2234,7 @@ async function fetchNotes(path) {
 
 async function putNote(anchor, snapshot, body) {
   const payload = {
-    repo: currentRepo, path: notesState.path,
+    path: notesState.path,
     if_match_mtime: notesState.mtime,
     anchor, snapshot, body,
   };
@@ -2496,7 +2257,7 @@ async function putNote(anchor, snapshot, body) {
 
 async function deleteNote(anchor) {
   const payload = {
-    repo: currentRepo, path: notesState.path,
+    path: notesState.path,
     if_match_mtime: notesState.mtime,
     anchor,
   };
@@ -2519,7 +2280,7 @@ async function deleteNote(anchor) {
 
 async function relocateNote(oldAnchor, newAnchor, headingText) {
   const payload = {
-    repo: currentRepo, path: notesState.path,
+    path: notesState.path,
     if_match_mtime: notesState.mtime,
     old_anchor: oldAnchor, new_anchor: newAnchor, new_heading_text: headingText,
   };
@@ -3013,7 +2774,7 @@ async function reloadEmbedNotes() {
 }
 
 async function decorateNotesBadges() {
-  const url = `/api/notes/index?repo=${encodeURIComponent(currentRepo)}&path=${encodeURIComponent(currentPath)}`;
+  const url = `/api/notes/index?path=${encodeURIComponent(currentPath)}`;
   try {
     const resp = await fetch(url);
     if (!resp.ok) return;

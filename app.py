@@ -5,13 +5,13 @@ import os
 import re
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
+import threading
 from datetime import datetime
 from pathlib import Path
 
 import notes as notes_mod
 
-from flask import Flask, Response, abort, jsonify, render_template, request, send_file
+from flask import Flask, abort, jsonify, render_template, request, send_file
 
 try:
     import pillow_heif
@@ -23,29 +23,31 @@ except ImportError:
 
 app = Flask(__name__)
 
-CONFIG_FILE = Path(__file__).parent / "config.local.json"
+BASE_DIR = Path(__file__).resolve().parent
+CONFIG_FILE = BASE_DIR / "config.local.json"
+DATA_DIR = BASE_DIR / "data"
 
 
-def load_code_dir() -> Path:
+def load_config() -> dict:
+    if not CONFIG_FILE.is_file():
+        return {}
+    try:
+        return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def load_code_dir(config: dict) -> Path:
     env_value = os.environ.get("GIT_VIEWER_CODE_DIR")
     if env_value:
         return Path(env_value)
-    if CONFIG_FILE.is_file():
-        try:
-            config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            if config.get("code_dir"):
-                return Path(config["code_dir"])
-        except (json.JSONDecodeError, OSError):
-            pass
+    if config.get("code_dir"):
+        return Path(config["code_dir"])
     return Path("/home/user/code")
 
 
-def load_keep_awake_script():
-    if sys.platform != "win32" or not CONFIG_FILE.is_file():
-        return None
-    try:
-        config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+def load_keep_awake_script(config: dict):
+    if sys.platform != "win32":
         return None
     raw = config.get("keep_awake_script")
     if not raw:
@@ -54,86 +56,13 @@ def load_keep_awake_script():
     return path if path.is_file() else None
 
 
-CODE_DIR = load_code_dir()
-KEEP_AWAKE_SCRIPT = load_keep_awake_script()
-FAVORITES_FILE = Path(__file__).parent / "favorites.json"
+CONFIG = load_config()
+# Resolved once so every containment check compares against the same string.
+ROOT = load_code_dir(CONFIG).resolve()
+KEEP_AWAKE_SCRIPT = load_keep_awake_script(CONFIG)
 
 
-def read_favorites() -> list:
-    if FAVORITES_FILE.is_file():
-        try:
-            return json.loads(FAVORITES_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return []
-    return []
-
-
-def write_favorites(favs: list):
-    FAVORITES_FILE.write_text(json.dumps(favs, ensure_ascii=False), encoding="utf-8")
-
-
-BOOKMARKS_FILE = Path(__file__).parent / "bookmarks.json"
-
-
-def read_bookmarks() -> dict:
-    if BOOKMARKS_FILE.is_file():
-        try:
-            return json.loads(BOOKMARKS_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return {}
-    return {}
-
-
-def write_bookmarks(bms: dict):
-    BOOKMARKS_FILE.write_text(json.dumps(bms, ensure_ascii=False), encoding="utf-8")
-
-
-NAV_DIRECTIONS_FILE = Path(__file__).parent / "nav_directions.json"
-
-
-def read_nav_directions() -> dict:
-    if NAV_DIRECTIONS_FILE.is_file():
-        try:
-            return json.loads(NAV_DIRECTIONS_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return {}
-    return {}
-
-
-def write_nav_directions(d: dict):
-    NAV_DIRECTIONS_FILE.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
-
-
-def valid_repo(name: str) -> Path:
-    """Validate repo name and return path. Abort 404 if not a git repo.
-
-    Accepts 'repo' (direct child) or 'category/repo' (two-level).
-    """
-    if "\\" in name or name.startswith(".") or ".." in name:
-        abort(400)
-    parts = name.split("/")
-    if len(parts) > 2 or any(p.startswith(".") for p in parts):
-        abort(400)
-    repo_path = (CODE_DIR / name).resolve()
-    if not contained(repo_path, CODE_DIR.resolve()):
-        abort(403)
-    if not (repo_path / ".git").is_dir():
-        abort(404)
-    return repo_path
-
-
-# A repo's own config must never make git run a program we did not choose.
-# .git/config is reachable through PUT /api/blob, so diff.external would
-# otherwise turn GET /api/diff into arbitrary code execution, and fsmonitor
-# does the same for status. Command-line -c beats repo config. The diff call
-# sites additionally pass --no-ext-diff/--no-textconv, because .gitattributes
-# can name a textconv driver whose key cannot be enumerated here.
-GIT_SAFE_CONFIG = ["-c", "diff.external=", "-c", "core.fsmonitor=false"]
-
-# Belt and braces for the diff family, which is the only place that consults
-# external diff drivers and .gitattributes textconv filters.
-NO_EXT_DIFF = ["--no-ext-diff", "--no-textconv"]
-
+# --- Paths -----------------------------------------------------------------
 
 def contained(child: Path, root: Path) -> bool:
     """True if child is root itself or lies underneath it.
@@ -155,265 +84,116 @@ def has_git_component(rel: Path) -> bool:
     return any(part.rstrip(". ").lower() == ".git" for part in rel.parts)
 
 
-def git(repo_path: Path, *args: str, default: str = "") -> str:
-    """Run a git command and return stdout. Returns default on error."""
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo_path)] + GIT_SAFE_CONFIG + list(args),
-            capture_output=True, timeout=10,
-        )
-        if result.returncode != 0:
-            return default
-        return result.stdout.decode("utf-8", errors="replace").strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return default
+def resolve_rel(rel: str) -> Path:
+    """Map a ROOT-relative request path onto disk. Aborts on escape attempts."""
+    norm = rel.replace("\\", "/")
+    if ".." in norm.split("/"):
+        abort(400)
+    full = (ROOT / norm).resolve() if norm else ROOT
+    if not contained(full, ROOT):
+        abort(403)
+    return full
 
 
-def get_repo_info(repo_path: Path) -> dict:
-    """Gather status info for a single repo."""
-    name = repo_path.name
+def to_rel(full: Path) -> str:
+    return full.relative_to(ROOT).as_posix()
 
-    # One porcelain v2 call yields branch, upstream, ahead/behind, and changes.
-    # On Windows, each git invocation costs ~60-80ms, so fewer calls matters.
-    status_raw = git(repo_path, "status", "--porcelain=v2", "--branch")
-    branch = "unknown"
-    changes = 0
-    has_upstream = False
-    ahead = behind = 0
-    for line in status_raw.splitlines():
-        if line.startswith("# branch.head "):
-            branch = line[len("# branch.head "):]
-        elif line.startswith("# branch.upstream "):
-            has_upstream = True
-        elif line.startswith("# branch.ab "):
-            parts = line[len("# branch.ab "):].split()
-            if len(parts) == 2:
-                try:
-                    ahead = int(parts[0].lstrip("+"))
-                    behind = int(parts[1].lstrip("-"))
-                except ValueError:
-                    pass
-        elif line and not line.startswith("#"):
-            changes += 1
 
-    if has_upstream:
-        if ahead > 0 and behind > 0:
-            remote_status = f"ahead {ahead}, behind {behind}"
-        elif ahead > 0:
-            remote_status = f"ahead {ahead}"
-        elif behind > 0:
-            remote_status = f"behind {behind}"
-        else:
-            remote_status = "up to date"
-    else:
-        remote_status = "no remote"
+# --- JSON state (data/) ----------------------------------------------------
 
-    log_line = git(repo_path, "log", "-1", "--format=%h\t%s\t%aI")
-    if log_line and "\t" in log_line:
-        parts = log_line.split("\t", 2)
-        latest_commit, latest_message, latest_time = parts[0], parts[1], parts[2]
-    else:
-        latest_commit, latest_message, latest_time = "", "", ""
+class JsonStore:
+    """A small JSON document under data/, updated under a lock."""
 
-    return {
-        "name": name,
-        "branch": branch,
-        "changes": changes,
-        "latest_commit": latest_commit,
-        "latest_message": latest_message,
-        "latest_time": latest_time,
-        "remote_status": remote_status,
-    }
+    def __init__(self, name: str, default):
+        self.path = DATA_DIR / name
+        self.default = default
+        self.lock = threading.Lock()
+
+    def read(self):
+        if self.path.is_file():
+            try:
+                return json.loads(self.path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
+        return self.default()
+
+    def update(self, mutate):
+        """Read, let mutate() change the value in place, write back."""
+        with self.lock:
+            value = self.read()
+            mutate(value)
+            DATA_DIR.mkdir(exist_ok=True)
+            self.path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+
+
+favorites_store = JsonStore("favorites.json", list)      # [dir, ...]
+bookmarks_store = JsonStore("bookmarks.json", dict)      # {file: {type, index}}
+nav_dirs_store = JsonStore("nav_directions.json", dict)  # {"dir|ext": "reversed"}
+
+
+def _flatten_bookmarks(old: dict) -> dict:
+    # {repo: {path: entry}} -> {"repo/path": entry}
+    return {f"{repo}/{path}": entry
+            for repo, entries in old.items() for path, entry in entries.items()}
+
+
+def _rekey_nav_directions(old: dict) -> dict:
+    # "repo|dir|ext" -> "repo/dir|ext"
+    out = {}
+    for key, value in old.items():
+        parts = key.split("|")
+        if len(parts) == 3:
+            repo, d, ext = parts
+            key = f"{repo}/{d}|{ext}" if d else f"{repo}|{ext}"
+        out[key] = value
+    return out
+
+
+def migrate_legacy_state():
+    """Move pre-data/ state files from the project root, converting repo keys."""
+    for name, convert in (
+        ("favorites.json", lambda v: v),  # already ROOT-relative
+        ("bookmarks.json", _flatten_bookmarks),
+        ("nav_directions.json", _rekey_nav_directions),
+    ):
+        old, new = BASE_DIR / name, DATA_DIR / name
+        if not old.is_file() or new.exists():
+            continue
+        try:
+            value = convert(json.loads(old.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, OSError, ValueError, AttributeError):
+            app.logger.warning("skipping unreadable legacy %s", name)
+            continue
+        DATA_DIR.mkdir(exist_ok=True)
+        new.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+        old.unlink()
+
+
+migrate_legacy_state()
 
 
 @app.route("/")
 def index():
-    return render_template("index.html", code_dir=str(CODE_DIR.resolve()))
+    return render_template("index.html", code_dir=str(ROOT), root_name=ROOT.name or str(ROOT))
 
 
-@app.route("/api/check")
-def check():
-    """Lightweight endpoint: return HEAD hash + change count for polling."""
-    repo_name = request.args.get("repo", "")
-    if not repo_name:
-        return jsonify({"head": "", "changes": 0})
-    repo_path = valid_repo(repo_name)
-    head = git(repo_path, "rev-parse", "HEAD", default="")
-    status = git(repo_path, "status", "--porcelain")
-    changes = len(status.splitlines()) if status else 0
-    return jsonify({"head": head, "changes": changes})
-
-
-@app.route("/api/info")
-def info():
-    """Single-repo info (same shape as one entry in /api/repos)."""
-    name = request.args.get("repo", "")
-    repo_path = valid_repo(name)
-    data = get_repo_info(repo_path)
-    if "/" in name:
-        data["name"] = name
-        data["category"] = name.split("/", 1)[0]
-    else:
-        data["category"] = ""
-    return jsonify(data)
-
-
-@app.route("/api/repos")
-def repos():
-    # Collect all repo paths first, then fetch info in parallel
-    repo_entries = []  # (path, category)
-    for item in sorted(CODE_DIR.iterdir(), key=lambda p: p.name.lower()):
-        if not item.is_dir():
-            continue
-        if (item / ".git").is_dir():
-            repo_entries.append((item, ""))
-        else:
-            category = item.name
-            for sub in sorted(item.iterdir(), key=lambda p: p.name.lower()):
-                if sub.is_dir() and (sub / ".git").is_dir():
-                    repo_entries.append((sub, category))
-
-    def fetch_info(entry):
-        path, category = entry
-        info = get_repo_info(path)
-        if category:
-            info["name"] = f"{category}/{path.name}"
-        info["category"] = category
-        return info
-
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        repo_list = list(pool.map(fetch_info, repo_entries))
-    return jsonify(repo_list)
-
-
-@app.route("/api/log")
-def log():
-    name = request.args.get("repo", "")
-    limit = min(int(request.args.get("limit", "50")), 200)
-    repo_path = valid_repo(name)
-
-    raw = git(repo_path, "log", f"-{limit}",
-              "--format=%h\t%s\t%aI",
-              "--shortstat")
-
-    commits = []
-    lines = raw.splitlines()
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if "\t" not in line:
-            i += 1
-            continue
-        parts = line.split("\t", 2)
-        entry = {
-            "hash": parts[0],
-            "message": parts[1],
-            "time": parts[2],
-            "files_changed": 0,
-            "insertions": 0,
-            "deletions": 0,
-        }
-        i += 1
-        while i < len(lines) and lines[i] == "":
-            i += 1
-        if i < len(lines) and "file" in lines[i] and "\t" not in lines[i]:
-            stat = lines[i]
-            fc = re.search(r"(\d+) file", stat)
-            ins = re.search(r"(\d+) insertion", stat)
-            dels = re.search(r"(\d+) deletion", stat)
-            entry["files_changed"] = int(fc.group(1)) if fc else 0
-            entry["insertions"] = int(ins.group(1)) if ins else 0
-            entry["deletions"] = int(dels.group(1)) if dels else 0
-            i += 1
-        commits.append(entry)
-
-    return jsonify(commits)
-
-
-@app.route("/api/diff")
-def diff():
-    name = request.args.get("repo", "")
-    commit = request.args.get("commit", "")
-    repo_path = valid_repo(name)
-
-    file_path = request.args.get("file", "")
-    if file_path and ("/" == file_path[0] or ".." in file_path):
-        abort(400)
-
-    if commit:
-        if not commit.replace("-", "").isalnum() or len(commit) > 40:
-            abort(400)
-        parent = git(repo_path, "rev-parse", "--verify", f"{commit}^", default="")
-        if parent:
-            cmd = ["diff", *NO_EXT_DIFF, f"{commit}^..{commit}"]
-            if file_path:
-                cmd += ["--", file_path]
-            diff_text = git(repo_path, *cmd)
-            files_raw = git(repo_path, "diff", *NO_EXT_DIFF, "--name-only", f"{commit}^..{commit}")
-        else:
-            cmd = ["diff-tree", "-p", *NO_EXT_DIFF, "--root", commit]
-            if file_path:
-                cmd += ["--", file_path]
-            raw = git(repo_path, *cmd)
-            diff_text = raw.split("\n", 1)[1] if "\n" in raw else raw
-            files_raw = git(repo_path, "diff-tree", "--no-commit-id", *NO_EXT_DIFF, "--name-only", "-r", "--root", commit)
-    else:
-        file_args = ["--", file_path] if file_path else []
-        unstaged = git(repo_path, "diff", *NO_EXT_DIFF, *file_args)
-        staged = git(repo_path, "diff", *NO_EXT_DIFF, "--cached", *file_args)
-        diff_text = staged + ("\n" if staged and unstaged else "") + unstaged
-        files_raw = git(repo_path, "diff", *NO_EXT_DIFF, "--name-only") + "\n" + git(repo_path, "diff", *NO_EXT_DIFF, "--name-only", "--cached")
-
-    files = sorted(set(f for f in files_raw.splitlines() if f))
-
-    return jsonify({"diff": diff_text, "files": files})
-
-
-@app.route("/api/branches")
-def branches():
-    name = request.args.get("repo", "")
-    repo_path = valid_repo(name)
-
-    raw = git(repo_path, "branch", "-a", "--format=%(refname:short)\t%(HEAD)\t%(upstream:short)\t%(objectname:short)")
-    result = []
-    for line in raw.splitlines():
-        if not line:
-            continue
-        parts = line.split("\t", 3)
-        result.append({
-            "name": parts[0],
-            "current": parts[1].strip() == "*",
-            "upstream": parts[2] if len(parts) > 2 else "",
-            "hash": parts[3] if len(parts) > 3 else "",
-        })
-    return jsonify(result)
-
+# --- Files -----------------------------------------------------------------
 
 @app.route("/api/tree")
 def tree():
-    name = request.args.get("repo", "")
-    path = request.args.get("path", "")
-    repo_path = valid_repo(name)
-
-    if ".." in path:
-        abort(400)
-
-    target_dir = (repo_path / path).resolve() if path else repo_path
-    if not contained(target_dir, repo_path.resolve()):
-        abort(403)
+    target_dir = resolve_rel(request.args.get("path", ""))
     if not target_dir.is_dir():
         abort(404)
 
     entries = []
     for item in target_dir.iterdir():
-        rel = str(item.relative_to(repo_path)).replace("\\", "/")
         try:
             mtime = item.stat().st_mtime
         except OSError:
             mtime = 0.0
         entries.append({
             "name": item.name,
-            "path": rel,
+            "path": to_rel(item),
             "type": "tree" if item.is_dir() else "blob",
             "mtime": mtime,
         })
@@ -428,27 +208,19 @@ TEXT_EXTS = {
     '.rb', '.go', '.rs', '.java', '.c', '.h', '.cpp', '.hpp', '.vue', '.svelte',
     '.gitignore', '.dockerignore', '.dockerfile', '.makefile', '.srt', '',
 }
-IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.ico', '.bmp', '.avif', '.heic', '.heif'}
 HEIF_EXTS = {'.heic', '.heif'}
-PDF_EXTS = {'.pdf'}
 
 
 @app.route("/api/blob")
 def blob():
-    name = request.args.get("repo", "")
     path = request.args.get("path", "")
-    repo_path = valid_repo(name)
-
-    if not path or ".." in path:
+    if not path:
         abort(400)
-
-    file_full = (repo_path / path).resolve()
-    if not contained(file_full, repo_path.resolve()):
-        abort(403)
+    file_full = resolve_rel(path)
     if not file_full.is_file():
         abort(404)
 
-    filename = path.replace("\\", "/").rsplit("/", 1)[-1]
+    filename = file_full.name
     ext = ('.' + filename.rsplit('.', 1)[1]).lower() if '.' in filename else ''
 
     # Text files: return JSON with content and ext
@@ -475,44 +247,24 @@ def blob():
             abort(500)
 
     # Binary files (images, PDFs, audio, office docs, archives, etc.): return raw bytes
-    mime = mimetypes.guess_type(path)[0] or 'application/octet-stream'
-    return send_file(file_full, mimetype=mime, download_name=path.rsplit('/', 1)[-1])
-
-
-def _in_repo(file_full: Path, code_root: Path) -> bool:
-    """True if an ancestor of file_full (up to code_root) is a git work tree."""
-    parent = file_full.parent
-    while True:
-        if (parent / ".git").is_dir():
-            return True
-        if parent == code_root or parent.parent == parent:
-            return False
-        parent = parent.parent
+    mime = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+    return send_file(file_full, mimetype=mime, download_name=filename)
 
 
 @app.route("/raw/<path:relpath>")
 def raw(relpath):
-    """Serve a repo file inline with its real content type.
+    """Serve a file inline with its real content type.
 
     Unlike /api/blob (which wraps text in JSON), this streams the raw bytes so
     the browser renders HTML as a page. The URL mirrors the on-disk layout
-    (CODE_DIR/<relpath>), so a page's relative CSS/JS/image references resolve
-    against sibling /raw/ URLs. Read-only preview of local repos.
+    (ROOT/<relpath>), so a page's relative CSS/JS/image references resolve
+    against sibling /raw/ URLs.
     """
-    norm = relpath.replace("\\", "/")
-    if ".." in norm.split("/"):
-        abort(400)
-    code_root = CODE_DIR.resolve()
-    file_full = (CODE_DIR / norm).resolve()
-    if not contained(file_full, code_root):
-        abort(403)
+    file_full = resolve_rel(relpath)
     if not file_full.is_file():
         abort(404)
-    if any(part == ".git" for part in file_full.relative_to(code_root).parts):
+    if has_git_component(file_full.relative_to(ROOT)):
         abort(404)
-    if not _in_repo(file_full, code_root):
-        abort(404)
-
     mime = mimetypes.guess_type(str(file_full))[0] or "application/octet-stream"
     return send_file(file_full, mimetype=mime)
 
@@ -522,27 +274,18 @@ def blob_write():
     data = request.get_json()
     if not data:
         abort(400)
-    name = data.get("repo", "")
     path = data.get("path", "")
     file_content = data.get("content")
-    if file_content is None:
+    if file_content is None or not path:
         abort(400)
 
-    repo_path = valid_repo(name)
-
-    if not path or ".." in path:
-        abort(400)
-
-    file_full = (repo_path / path).resolve()
-    if not contained(file_full, repo_path.resolve()):
-        abort(403)
+    file_full = resolve_rel(path)
     if not file_full.is_file():
         abort(404)
 
-    # Git metadata is off limits. Writing .git/config would let a caller set
-    # diff.external and have the next /api/diff run a program of their choosing,
-    # and hooks are an execution vector in their own right.
-    if has_git_component(file_full.relative_to(repo_path.resolve())):
+    # Git metadata is off limits: hooks and config would run the next time
+    # the user invokes git in that repository.
+    if has_git_component(file_full.relative_to(ROOT)):
         abort(403)
 
     try:
@@ -552,9 +295,11 @@ def blob_write():
     return jsonify({"ok": True})
 
 
+# --- Favorites / bookmarks / nav direction --------------------------------
+
 @app.route("/api/favorites")
 def favorites():
-    return jsonify(read_favorites())
+    return jsonify(favorites_store.read())
 
 
 @app.route("/api/favorites", methods=["POST"])
@@ -563,10 +308,7 @@ def add_favorite():
     if not data or "path" not in data:
         abort(400)
     path = data["path"]
-    favs = read_favorites()
-    if path not in favs:
-        favs.append(path)
-        write_favorites(favs)
+    favorites_store.update(lambda favs: path in favs or favs.append(path))
     return jsonify({"ok": True})
 
 
@@ -576,23 +318,21 @@ def remove_favorite():
     if not data or "path" not in data:
         abort(400)
     path = data["path"]
-    favs = read_favorites()
-    if path in favs:
-        favs.remove(path)
-        write_favorites(favs)
+    favorites_store.update(lambda favs: path in favs and favs.remove(path))
     return jsonify({"ok": True})
+
+
+def _bookmark_path(path: str) -> str:
+    if not path:
+        abort(400)
+    resolve_rel(path)
+    return path
 
 
 @app.route("/api/bookmark")
 def bookmark_get():
-    name = request.args.get("repo", "")
-    path = request.args.get("path", "")
-    valid_repo(name)
-    if not path or ".." in path:
-        abort(400)
-    bms = read_bookmarks()
-    entry = bms.get(name, {}).get(path)
-    return jsonify(entry or {})
+    path = _bookmark_path(request.args.get("path", ""))
+    return jsonify(bookmarks_store.read().get(path) or {})
 
 
 @app.route("/api/bookmark", methods=["PUT"])
@@ -600,20 +340,12 @@ def bookmark_set():
     data = request.get_json()
     if not data:
         abort(400)
-    name = data.get("repo", "")
-    path = data.get("path", "")
     btype = data.get("type", "")
     index = data.get("index")
     if btype not in ("md", "text") or not isinstance(index, int):
         abort(400)
-    valid_repo(name)
-    if not path or ".." in path:
-        abort(400)
-    bms = read_bookmarks()
-    if name not in bms:
-        bms[name] = {}
-    bms[name][path] = {"type": btype, "index": index}
-    write_bookmarks(bms)
+    path = _bookmark_path(data.get("path", ""))
+    bookmarks_store.update(lambda bms: bms.__setitem__(path, {"type": btype, "index": index}))
     return jsonify({"ok": True})
 
 
@@ -622,23 +354,14 @@ def bookmark_remove():
     data = request.get_json()
     if not data:
         abort(400)
-    name = data.get("repo", "")
-    path = data.get("path", "")
-    valid_repo(name)
-    if not path or ".." in path:
-        abort(400)
-    bms = read_bookmarks()
-    if name in bms and path in bms[name]:
-        del bms[name][path]
-        if not bms[name]:
-            del bms[name]
-        write_bookmarks(bms)
+    path = _bookmark_path(data.get("path", ""))
+    bookmarks_store.update(lambda bms: bms.pop(path, None))
     return jsonify({"ok": True})
 
 
 @app.route("/api/nav_direction")
 def nav_direction_get():
-    return jsonify(read_nav_directions())
+    return jsonify(nav_dirs_store.read())
 
 
 @app.route("/api/nav_direction", methods=["POST"])
@@ -648,24 +371,25 @@ def nav_direction_set():
         abort(400)
     key = data["key"]
     direction = data.get("direction", "normal")
-    dirs = read_nav_directions()
-    if direction == "normal":
-        dirs.pop(key, None)
-    else:
-        dirs[key] = direction
-    write_nav_directions(dirs)
+
+    def apply(dirs):
+        if direction == "normal":
+            dirs.pop(key, None)
+        else:
+            dirs[key] = direction
+    nav_dirs_store.update(apply)
     return jsonify({"ok": True})
 
+
+# --- Playback --------------------------------------------------------------
 
 PLAYBACK_MIN_SECONDS = 15
 
 
-def _playback_log_path(repo_path: Path, rel_path: str) -> Path:
-    if not rel_path or ".." in rel_path:
+def _playback_log_path(rel_path: str) -> Path:
+    if not rel_path:
         abort(400)
-    audio_full = (repo_path / rel_path).resolve()
-    if not contained(audio_full, repo_path.resolve()):
-        abort(403)
+    audio_full = resolve_rel(rel_path)
     if not audio_full.is_file():
         abort(404)
     return audio_full.parent / (audio_full.name + ".playback.jsonl")
@@ -673,10 +397,7 @@ def _playback_log_path(repo_path: Path, rel_path: str) -> Path:
 
 @app.route("/api/playback-log")
 def playback_log_list():
-    name = request.args.get("repo", "")
-    path = request.args.get("path", "")
-    repo_path = valid_repo(name)
-    log_file = _playback_log_path(repo_path, path)
+    log_file = _playback_log_path(request.args.get("path", ""))
     if not log_file.is_file():
         return jsonify([])
     records = []
@@ -696,8 +417,6 @@ def playback_log_add():
     data = request.get_json()
     if not data:
         abort(400)
-    name = data.get("repo", "")
-    path = data.get("path", "")
     start_sec = data.get("start_sec")
     end_sec = data.get("end_sec")
     started_at = data.get("started_at", "")
@@ -706,8 +425,7 @@ def playback_log_add():
         abort(400)
     if end_sec - start_sec < PLAYBACK_MIN_SECONDS:
         return jsonify({"ok": True, "skipped": True})
-    repo_path = valid_repo(name)
-    log_file = _playback_log_path(repo_path, path)
+    log_file = _playback_log_path(data.get("path", ""))
     record = {
         "started_at": str(started_at),
         "ended_at": str(ended_at),
@@ -719,10 +437,14 @@ def playback_log_add():
     return jsonify({"ok": True})
 
 
+# Directories never worth descending into when hunting for audio.
+SCAN_SKIP_DIRS = {"archived", "node_modules", "__pycache__", "venv", "site-packages"}
+
+
 def _iter_output_mp3(base_full: Path):
-    """Yield every `output.mp3` under base_full, pruning .git/hidden/archived dirs."""
+    """Yield every `output.mp3` under base_full, pruning hidden/archived/vendor dirs."""
     for root, dirs, files in os.walk(base_full):
-        dirs[:] = [d for d in dirs if not d.startswith(".") and d != "archived"]
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in SCAN_SKIP_DIRS]
         if "output.mp3" in files:
             yield Path(root) / "output.mp3"
 
@@ -790,17 +512,10 @@ def _coverage_from_log(log_file: Path):
 
 @app.route("/api/playback-overview")
 def playback_overview():
-    """Aggregate listening progress for every output.mp3 under a repo (optionally
-    scoped to ?path=). One row per audio: coverage/reach/last-played, so a caller
+    """Aggregate listening progress for every output.mp3 under ?path= (default:
+    the whole root). One row per audio: coverage/reach/last-played, so a caller
     can render a cross-project "what have I listened to, how far" dashboard."""
-    name = request.args.get("repo", "")
-    base = request.args.get("path", "") or ""
-    repo_path = valid_repo(name)
-    if ".." in base:
-        abort(400)
-    base_full = (repo_path / base).resolve() if base else repo_path.resolve()
-    if not contained(base_full, repo_path.resolve()):
-        abort(403)
+    base_full = resolve_rel(request.args.get("path", ""))
     items = []
     if base_full.is_dir():
         for mp3 in _iter_output_mp3(base_full):
@@ -815,8 +530,8 @@ def playback_overview():
             except OSError:
                 mtime = 0.0
             items.append({
-                "dir": folder.relative_to(repo_path).as_posix(),
-                "audio": mp3.relative_to(repo_path).as_posix(),
+                "dir": to_rel(folder),
+                "audio": to_rel(mp3),
                 "name": folder.name,
                 "duration_sec": round(duration, 1) if duration else None,
                 "covered_sec": round(covered, 1),
@@ -869,6 +584,8 @@ def keep_awake():
     return ("", 204)
 
 
+# --- Notes -----------------------------------------------------------------
+
 NOTES_SUFFIX = ".notes.md"
 SNAPSHOT_TEXT_LIMIT = 50 * 1024  # 50 KB
 
@@ -880,6 +597,14 @@ def _notes_kind_for_path(path: str) -> str:
     if ext == '.srt':
         return 'srt'
     return 'lines'
+
+
+def _notes_paths(path: str):
+    """(target file, its sidecar .notes.md) for a ROOT-relative target path."""
+    if not path or path.endswith(NOTES_SUFFIX):
+        abort(400)
+    target_full = resolve_rel(path)
+    return target_full, target_full.parent / (target_full.name + NOTES_SUFFIX)
 
 
 def _promote_to_unresolved(sec, reason):
@@ -1006,18 +731,9 @@ def _check_mtime(notes_full, expected):
 
 @app.route("/api/notes")
 def notes_get():
-    name = request.args.get("repo", "")
     path = request.args.get("path", "")
-    repo_path = valid_repo(name)
-    if not path or ".." in path or path.endswith(NOTES_SUFFIX):
-        abort(400)
-
-    target_full = (repo_path / path).resolve()
-    if not contained(target_full, repo_path.resolve()):
-        abort(403)
-
+    target_full, notes_full = _notes_paths(path)
     kind = _notes_kind_for_path(path)
-    notes_full = target_full.parent / (target_full.name + NOTES_SUFFIX)
 
     if not notes_full.is_file():
         return jsonify({"mtime": None, "kind": kind, "resolved": [], "unresolved": []})
@@ -1063,8 +779,6 @@ def notes_get():
 @app.route("/api/notes", methods=["PUT"])
 def notes_put():
     data = request.get_json(silent=True) or {}
-    name = data.get("repo", "")
-    path = data.get("path", "")
     anchor = data.get("anchor")
     snapshot = data.get("snapshot")
     body = data.get("body", "")
@@ -1073,13 +787,7 @@ def notes_put():
         abort(400)
     if not _validate_anchor(anchor) or not _validate_snapshot(snapshot):
         abort(400)
-    repo_path = valid_repo(name)
-    if not path or ".." in path or path.endswith(NOTES_SUFFIX):
-        abort(400)
-    target_full = (repo_path / path).resolve()
-    if not contained(target_full, repo_path.resolve()):
-        abort(403)
-    notes_full = target_full.parent / (target_full.name + NOTES_SUFFIX)
+    target_full, notes_full = _notes_paths(data.get("path", ""))
 
     if not _check_mtime(notes_full, if_match):
         abort(409)
@@ -1111,19 +819,11 @@ def notes_put():
 @app.route("/api/notes", methods=["DELETE"])
 def notes_delete():
     data = request.get_json(silent=True) or {}
-    name = data.get("repo", "")
-    path = data.get("path", "")
     anchor = data.get("anchor")
     if_match = data.get("if_match_mtime", None)
     if not _validate_anchor(anchor):
         abort(400)
-    repo_path = valid_repo(name)
-    if not path or ".." in path or path.endswith(NOTES_SUFFIX):
-        abort(400)
-    target_full = (repo_path / path).resolve()
-    if not contained(target_full, repo_path.resolve()):
-        abort(403)
-    notes_full = target_full.parent / (target_full.name + NOTES_SUFFIX)
+    _, notes_full = _notes_paths(data.get("path", ""))
     if not notes_full.is_file():
         return jsonify({"mtime": None})
     if not _check_mtime(notes_full, if_match):
@@ -1143,8 +843,6 @@ def notes_delete():
 @app.route("/api/notes/relocate", methods=["POST"])
 def notes_relocate():
     data = request.get_json(silent=True) or {}
-    name = data.get("repo", "")
-    path = data.get("path", "")
     old_anchor = data.get("old_anchor")
     new_anchor = data.get("new_anchor")
     new_heading_text = data.get("new_heading_text", "")
@@ -1155,13 +853,7 @@ def notes_relocate():
         abort(400)
     if not isinstance(new_heading_text, str):
         abort(400)
-    repo_path = valid_repo(name)
-    if not path or ".." in path or path.endswith(NOTES_SUFFIX):
-        abort(400)
-    target_full = (repo_path / path).resolve()
-    if not contained(target_full, repo_path.resolve()):
-        abort(403)
-    notes_full = target_full.parent / (target_full.name + NOTES_SUFFIX)
+    _, notes_full = _notes_paths(data.get("path", ""))
     if not notes_full.is_file():
         abort(404)
     if not _check_mtime(notes_full, if_match):
@@ -1185,14 +877,7 @@ def notes_relocate():
 
 @app.route("/api/notes/index")
 def notes_index():
-    name = request.args.get("repo", "")
-    path = request.args.get("path", "") or ""
-    repo_path = valid_repo(name)
-    if ".." in path:
-        abort(400)
-    base_full = (repo_path / path).resolve() if path else repo_path
-    if not contained(base_full, repo_path.resolve()):
-        abort(403)
+    base_full = resolve_rel(request.args.get("path", ""))
     if not base_full.is_dir():
         return jsonify({"files": {}})
     out = {}

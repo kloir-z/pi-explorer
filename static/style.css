@@ -109,21 +109,6 @@ button:hover { background: var(--border); }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
 ::-webkit-scrollbar-corner { background: transparent; }
 
-/* Status bar */
-.status-bar {
-  display: flex;
-  gap: 16px;
-  padding: 6px 0;
-  border-bottom: 1px solid #21262d;
-  margin-bottom: 8px;
-  font-size: 11px;
-}
-.status-bar .label { color: var(--text-muted); }
-.status-bar .val-branch { color: var(--green); font-weight: bold; }
-.status-bar .val-changes { color: var(--yellow); font-weight: bold; }
-.status-bar .val-time { color: var(--accent); }
-.status-bar .val-remote { color: var(--green); }
-
 /* Section header */
 .section-header {
   color: var(--text-muted);
@@ -137,7 +122,7 @@ button:hover { background: var(--border); }
 }
 .section-header:first-of-type { margin-top: 0; }
 
-/* File list / commit list */
+/* File list */
 .list-box {
   background: var(--surface);
   border: 1px solid #21262d;
@@ -154,125 +139,14 @@ button:hover { background: var(--border); }
 .list-row:last-child { border-bottom: none; }
 .list-row:hover { background: #1c2128; }
 
-/* Change type badges */
-.badge-m { color: var(--yellow); font-weight: bold; width: 14px; }
-.badge-a { color: var(--green); font-weight: bold; width: 14px; }
-.badge-d { color: var(--red); font-weight: bold; width: 14px; }
-.badge-r { color: var(--purple); font-weight: bold; width: 14px; }
-
-/* Commit hash */
-.commit-hash { color: var(--purple); }
-.commit-msg { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.commit-time { color: var(--text-dim); margin-left: auto; white-space: nowrap; }
-.commit-stat { color: var(--text-muted); font-size: 11px; margin-left: 8px; white-space: nowrap; }
-.stat-add { color: var(--green); }
-.stat-del { color: var(--red); }
-
-/* Clickable commit row */
+/* Clickable row */
 .list-row.clickable { cursor: pointer; }
 
-/* Diff container */
-.diff-container {
-  background: var(--surface);
-  border: 1px solid #21262d;
-  border-radius: 4px;
-  overflow-x: auto;
-  margin-bottom: 8px;
-}
-.diff-empty {
+.empty-msg {
   color: var(--text-muted);
   padding: 16px;
   text-align: center;
 }
-
-/* diff2html dark overrides */
-.d2h-wrapper { background: var(--surface) !important; }
-.d2h-file-header { background: #21262d !important; color: var(--text) !important; border-bottom: 1px solid var(--border) !important; padding: 3px 8px !important; }
-.d2h-file-name { color: var(--text) !important; }
-.d2h-code-line-ctn { font-family: inherit !important; }
-.d2h-info { background: #1c2128 !important; color: var(--text-muted) !important; }
-.d2h-emptyplaceholder { background: var(--bg) !important; }
-.d2h-tag { display: none !important; }
-
-/* line-by-line: fix absolute positioning — use table cells instead */
-.d2h-code-linenumber {
-  position: static !important;
-  display: table-cell !important;
-  width: auto !important;
-  min-width: 3em !important;
-  padding: 0 4px !important;
-  text-align: right !important;
-  color: var(--text-dim) !important;
-  background: var(--surface) !important;
-  border-right: 1px solid var(--border) !important;
-  font-size: 12px !important;
-  line-height: 1.3 !important;
-  vertical-align: top !important;
-}
-.d2h-code-line {
-  display: table-cell !important;
-  padding: 0 4px !important;
-  width: auto !important;
-  color: var(--text) !important;
-  font-size: 12px !important;
-  line-height: 1.3 !important;
-}
-
-/* colors */
-.d2h-del { background: rgba(248, 81, 73, 0.1) !important; }
-.d2h-ins { background: rgba(63, 185, 80, 0.1) !important; }
-.d2h-del del, .d2h-code-line-ctn del { background: rgba(248, 81, 73, 0.35) !important; color: #ffa198 !important; text-decoration: none !important; border-radius: 2px; }
-.d2h-ins ins, .d2h-code-line-ctn ins { background: rgba(63, 185, 80, 0.35) !important; color: #7ee787 !important; text-decoration: none !important; border-radius: 2px; }
-
-/* side-by-side */
-.d2h-file-side-diff { background: var(--surface) !important; }
-.d2h-code-side-linenumber {
-  position: static !important;
-  display: table-cell !important;
-  width: auto !important;
-  min-width: 3em !important;
-  padding: 0 4px !important;
-  text-align: right !important;
-  color: var(--text-dim) !important;
-  background: var(--surface) !important;
-  border-right: 1px solid var(--border) !important;
-  font-size: 12px !important;
-  line-height: 1.3 !important;
-  vertical-align: top !important;
-}
-.d2h-code-side-line {
-  display: table-cell !important;
-  padding: 0 4px !important;
-  color: var(--text) !important;
-  font-size: 12px !important;
-  line-height: 1.3 !important;
-}
-.d2h-code-side-emptyplaceholder { background: #1c2128 !important; }
-
-/* Diff toggle button */
-.diff-toggle {
-  background: #21262d;
-  color: var(--text-muted);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 1px 8px;
-  font-size: 11px;
-  font-family: inherit;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.diff-toggle:hover { color: var(--text); background: var(--border); }
-.diff-toolbar {
-  padding: 4px 8px;
-  display: flex;
-  justify-content: flex-end;
-}
-
-/* Branch list */
-.branch-current { background: rgba(88, 166, 255, 0.08); }
-.branch-icon { width: 14px; text-align: center; color: var(--accent); font-size: 8px; }
-.branch-name { color: var(--text); }
-.branch-current .branch-name { color: var(--accent); font-weight: bold; }
 
 /* File tree */
 .tree-icon { width: 18px; text-align: center; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; }
@@ -371,29 +245,14 @@ button:hover { background: var(--border); }
 .markdown-body.md-theme-sepia th, .markdown-body.md-theme-sepia td { border-color: #d4c9b8; }
 .markdown-body.md-theme-sepia th { background: #e8dfd0; }
 
-/* Change detection badge */
-.change-badge {
-  display: inline-block; padding: 2px 8px; margin-left: 8px;
-  background: var(--accent); color: #fff; border-radius: 8px;
-  font-size: 11px; cursor: pointer; animation: badge-pulse 2s ease-in-out;
-  vertical-align: middle;
-}
-@keyframes badge-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.6; }
-}
-
 /* highlight.js override for dark bg */
 .hljs { background: #161b22 !important; }
 
 /* Mobile */
 @media (max-width: 768px) {
-  .header { flex-wrap: wrap; gap: 6px; }
-  .header-controls { width: 100%; }
-  select { flex: 1; }
+  .header { gap: 6px; }
+  select { flex: 1; min-width: 0; }
   .tabs { overflow-x: auto; }
-  .status-bar { flex-wrap: wrap; gap: 8px; }
-  .commit-stat { display: none; }
 }
 
 /* Edit mode */
