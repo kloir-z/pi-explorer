@@ -115,18 +115,51 @@ def valid_repo(name: str) -> Path:
     if len(parts) > 2 or any(p.startswith(".") for p in parts):
         abort(400)
     repo_path = (CODE_DIR / name).resolve()
-    if not str(repo_path).startswith(str(CODE_DIR.resolve())):
+    if not contained(repo_path, CODE_DIR.resolve()):
         abort(403)
     if not (repo_path / ".git").is_dir():
         abort(404)
     return repo_path
 
 
+# A repo's own config must never make git run a program we did not choose.
+# .git/config is reachable through PUT /api/blob, so diff.external would
+# otherwise turn GET /api/diff into arbitrary code execution, and fsmonitor
+# does the same for status. Command-line -c beats repo config. The diff call
+# sites additionally pass --no-ext-diff/--no-textconv, because .gitattributes
+# can name a textconv driver whose key cannot be enumerated here.
+GIT_SAFE_CONFIG = ["-c", "diff.external=", "-c", "core.fsmonitor=false"]
+
+# Belt and braces for the diff family, which is the only place that consults
+# external diff drivers and .gitattributes textconv filters.
+NO_EXT_DIFF = ["--no-ext-diff", "--no-textconv"]
+
+
+def contained(child: Path, root: Path) -> bool:
+    """True if child is root itself or lies underneath it.
+
+    A bare str.startswith() accepts a sibling whose name merely extends the
+    root's -- 'C:/code/git-viewer-EVIL'.startswith('C:/code/git-viewer') is
+    True -- so the separator has to take part in the comparison.
+    """
+    child_s, root_s = str(child), str(root)
+    return child_s == root_s or child_s.startswith(root_s + os.sep)
+
+
+def has_git_component(rel: Path) -> bool:
+    """True if any path segment names the .git directory.
+
+    Windows ignores trailing dots and spaces, so '.git.' reaches the same
+    directory as '.git' and has to be caught here too.
+    """
+    return any(part.rstrip(". ").lower() == ".git" for part in rel.parts)
+
+
 def git(repo_path: Path, *args: str, default: str = "") -> str:
     """Run a git command and return stdout. Returns default on error."""
     try:
         result = subprocess.run(
-            ["git", "-C", str(repo_path)] + list(args),
+            ["git", "-C", str(repo_path)] + GIT_SAFE_CONFIG + list(args),
             capture_output=True, timeout=10,
         )
         if result.returncode != 0:
@@ -312,24 +345,24 @@ def diff():
             abort(400)
         parent = git(repo_path, "rev-parse", "--verify", f"{commit}^", default="")
         if parent:
-            cmd = ["diff", f"{commit}^..{commit}"]
+            cmd = ["diff", *NO_EXT_DIFF, f"{commit}^..{commit}"]
             if file_path:
                 cmd += ["--", file_path]
             diff_text = git(repo_path, *cmd)
-            files_raw = git(repo_path, "diff", "--name-only", f"{commit}^..{commit}")
+            files_raw = git(repo_path, "diff", *NO_EXT_DIFF, "--name-only", f"{commit}^..{commit}")
         else:
-            cmd = ["diff-tree", "-p", "--root", commit]
+            cmd = ["diff-tree", "-p", *NO_EXT_DIFF, "--root", commit]
             if file_path:
                 cmd += ["--", file_path]
             raw = git(repo_path, *cmd)
             diff_text = raw.split("\n", 1)[1] if "\n" in raw else raw
-            files_raw = git(repo_path, "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", commit)
+            files_raw = git(repo_path, "diff-tree", "--no-commit-id", *NO_EXT_DIFF, "--name-only", "-r", "--root", commit)
     else:
         file_args = ["--", file_path] if file_path else []
-        unstaged = git(repo_path, "diff", *file_args)
-        staged = git(repo_path, "diff", "--cached", *file_args)
+        unstaged = git(repo_path, "diff", *NO_EXT_DIFF, *file_args)
+        staged = git(repo_path, "diff", *NO_EXT_DIFF, "--cached", *file_args)
         diff_text = staged + ("\n" if staged and unstaged else "") + unstaged
-        files_raw = git(repo_path, "diff", "--name-only") + "\n" + git(repo_path, "diff", "--name-only", "--cached")
+        files_raw = git(repo_path, "diff", *NO_EXT_DIFF, "--name-only") + "\n" + git(repo_path, "diff", *NO_EXT_DIFF, "--name-only", "--cached")
 
     files = sorted(set(f for f in files_raw.splitlines() if f))
 
@@ -366,7 +399,7 @@ def tree():
         abort(400)
 
     target_dir = (repo_path / path).resolve() if path else repo_path
-    if not str(target_dir).startswith(str(repo_path.resolve())):
+    if not contained(target_dir, repo_path.resolve()):
         abort(403)
     if not target_dir.is_dir():
         abort(404)
@@ -410,7 +443,7 @@ def blob():
         abort(400)
 
     file_full = (repo_path / path).resolve()
-    if not str(file_full).startswith(str(repo_path.resolve())):
+    if not contained(file_full, repo_path.resolve()):
         abort(403)
     if not file_full.is_file():
         abort(404)
@@ -471,7 +504,7 @@ def raw(relpath):
         abort(400)
     code_root = CODE_DIR.resolve()
     file_full = (CODE_DIR / norm).resolve()
-    if not (file_full == code_root or str(file_full).startswith(str(code_root) + os.sep)):
+    if not contained(file_full, code_root):
         abort(403)
     if not file_full.is_file():
         abort(404)
@@ -501,10 +534,16 @@ def blob_write():
         abort(400)
 
     file_full = (repo_path / path).resolve()
-    if not str(file_full).startswith(str(repo_path.resolve())):
+    if not contained(file_full, repo_path.resolve()):
         abort(403)
     if not file_full.is_file():
         abort(404)
+
+    # Git metadata is off limits. Writing .git/config would let a caller set
+    # diff.external and have the next /api/diff run a program of their choosing,
+    # and hooks are an execution vector in their own right.
+    if has_git_component(file_full.relative_to(repo_path.resolve())):
+        abort(403)
 
     try:
         file_full.write_text(file_content, encoding="utf-8")
@@ -625,7 +664,7 @@ def _playback_log_path(repo_path: Path, rel_path: str) -> Path:
     if not rel_path or ".." in rel_path:
         abort(400)
     audio_full = (repo_path / rel_path).resolve()
-    if not str(audio_full).startswith(str(repo_path.resolve())):
+    if not contained(audio_full, repo_path.resolve()):
         abort(403)
     if not audio_full.is_file():
         abort(404)
@@ -760,7 +799,7 @@ def playback_overview():
     if ".." in base:
         abort(400)
     base_full = (repo_path / base).resolve() if base else repo_path.resolve()
-    if not str(base_full).startswith(str(repo_path.resolve())):
+    if not contained(base_full, repo_path.resolve()):
         abort(403)
     items = []
     if base_full.is_dir():
@@ -974,7 +1013,7 @@ def notes_get():
         abort(400)
 
     target_full = (repo_path / path).resolve()
-    if not str(target_full).startswith(str(repo_path.resolve())):
+    if not contained(target_full, repo_path.resolve()):
         abort(403)
 
     kind = _notes_kind_for_path(path)
@@ -1038,7 +1077,7 @@ def notes_put():
     if not path or ".." in path or path.endswith(NOTES_SUFFIX):
         abort(400)
     target_full = (repo_path / path).resolve()
-    if not str(target_full).startswith(str(repo_path.resolve())):
+    if not contained(target_full, repo_path.resolve()):
         abort(403)
     notes_full = target_full.parent / (target_full.name + NOTES_SUFFIX)
 
@@ -1082,7 +1121,7 @@ def notes_delete():
     if not path or ".." in path or path.endswith(NOTES_SUFFIX):
         abort(400)
     target_full = (repo_path / path).resolve()
-    if not str(target_full).startswith(str(repo_path.resolve())):
+    if not contained(target_full, repo_path.resolve()):
         abort(403)
     notes_full = target_full.parent / (target_full.name + NOTES_SUFFIX)
     if not notes_full.is_file():
@@ -1120,7 +1159,7 @@ def notes_relocate():
     if not path or ".." in path or path.endswith(NOTES_SUFFIX):
         abort(400)
     target_full = (repo_path / path).resolve()
-    if not str(target_full).startswith(str(repo_path.resolve())):
+    if not contained(target_full, repo_path.resolve()):
         abort(403)
     notes_full = target_full.parent / (target_full.name + NOTES_SUFFIX)
     if not notes_full.is_file():
@@ -1152,7 +1191,7 @@ def notes_index():
     if ".." in path:
         abort(400)
     base_full = (repo_path / path).resolve() if path else repo_path
-    if not str(base_full).startswith(str(repo_path.resolve())):
+    if not contained(base_full, repo_path.resolve()):
         abort(403)
     if not base_full.is_dir():
         return jsonify({"files": {}})
