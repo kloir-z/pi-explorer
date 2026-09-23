@@ -1,4 +1,4 @@
-from notes import encode_snapshot, decode_snapshot
+from explorer.notes import encode_snapshot, decode_snapshot
 
 
 def test_encode_snapshot_lines():
@@ -42,7 +42,7 @@ def test_encode_decode_roundtrip_with_timestamps():
     assert decode_snapshot(encode_snapshot(snap)) == snap
 
 
-from notes import parse_anchor_heading, format_anchor_heading
+from explorer.notes import parse_anchor_heading, format_anchor_heading
 
 
 def test_parse_lines_range():
@@ -81,8 +81,7 @@ def test_put_notes_creates_file(app_client):
     client, repo = app_client
     (repo / "foo.py").write_text("a\nb\n", encoding="utf-8")
     payload = {
-        "repo": "myrepo",
-        "path": "foo.py",
+        "path": "myrepo/foo.py",
         "if_match_mtime": None,
         "anchor": {"kind": "lines", "start": 1, "end": 1},
         "snapshot": {"kind": "lines", "start": 1, "end": 1, "text": "a"},
@@ -108,8 +107,7 @@ def test_put_notes_overwrites_existing(app_client):
     notes_path.write_text(initial, encoding="utf-8")
     mtime = notes_path.stat().st_mtime
     payload = {
-        "repo": "myrepo",
-        "path": "foo.py",
+        "path": "myrepo/foo.py",
         "if_match_mtime": mtime,
         "anchor": {"kind": "lines", "start": 1, "end": 1},
         "snapshot": {"kind": "lines", "start": 1, "end": 1, "text": "a"},
@@ -128,8 +126,7 @@ def test_put_notes_mtime_conflict(app_client):
     notes_path = repo / "foo.py.notes.md"
     notes_path.write_text("## L1\nbody\n", encoding="utf-8")
     payload = {
-        "repo": "myrepo",
-        "path": "foo.py",
+        "path": "myrepo/foo.py",
         "if_match_mtime": 0.0,
         "anchor": {"kind": "lines", "start": 1, "end": 1},
         "snapshot": None,
@@ -144,7 +141,7 @@ def test_put_notes_rejects_huge_snapshot(app_client):
     (repo / "foo.py").write_text("a\n", encoding="utf-8")
     huge = "x" * (50 * 1024 + 1)
     payload = {
-        "repo": "myrepo", "path": "foo.py", "if_match_mtime": None,
+        "path": "myrepo/foo.py", "if_match_mtime": None,
         "anchor": {"kind": "lines", "start": 1, "end": 1},
         "snapshot": {"kind": "lines", "start": 1, "end": 1, "text": huge},
         "body": "x",
@@ -202,7 +199,7 @@ def test_format_srt():
     assert out == "00:01:23,456 --> 00:01:30,000"
 
 
-from notes import parse_notes_md
+from explorer.notes import parse_notes_md
 
 
 def test_parse_empty_string():
@@ -297,7 +294,7 @@ def test_parse_duplicate_anchor_first_wins():
     assert "first" in doc.resolved[0].body
 
 
-from notes import serialize_notes_md, NotesDoc, NotesSection
+from explorer.notes import serialize_notes_md, NotesDoc, NotesSection
 
 
 def test_serialize_empty():
@@ -383,7 +380,7 @@ def test_serialize_parse_roundtrip():
     assert parsed.unresolved[0].anchor == original.unresolved[0].anchor
 
 
-from notes import atomic_write_text
+from explorer.notes import atomic_write_text
 
 
 def test_atomic_write_creates_file(tmp_path):
@@ -412,7 +409,7 @@ def test_atomic_write_no_temp_left_behind(tmp_path):
     assert leftovers == []
 
 
-from notes import resolve_lines_anchor
+from explorer.notes import resolve_lines_anchor
 
 
 def _make_snap(start, end, text):
@@ -476,7 +473,7 @@ def test_resolve_lines_no_snapshot_out_of_range():
     assert result.resolved is False
 
 
-from notes import parse_srt_cues, resolve_srt_anchor
+from explorer.notes import parse_srt_cues, resolve_srt_anchor
 
 
 SRT_SAMPLE = (
@@ -521,7 +518,7 @@ def test_resolve_srt_no_match():
     assert result.resolved is False
 
 
-from notes import notes_path_for, load_notes, save_notes, upsert_section, delete_section
+from explorer.notes import notes_path_for, load_notes, save_notes, upsert_section, delete_section
 
 
 def test_notes_path_for_appends_suffix():
@@ -587,24 +584,10 @@ def test_delete_not_found():
 import pytest
 
 
-@pytest.fixture
-def app_client(tmp_path, monkeypatch):
-    """Flask test client with CODE_DIR pointing at a tmp repo."""
-    repo = tmp_path / "myrepo"
-    (repo / ".git").mkdir(parents=True)
-    monkeypatch.setenv("GIT_VIEWER_CODE_DIR", str(tmp_path))
-    import sys
-    if "app" in sys.modules:
-        del sys.modules["app"]
-    import app as flask_app  # noqa: F401
-    flask_app.app.config["TESTING"] = True
-    return flask_app.app.test_client(), repo
-
-
 def test_get_notes_missing_file(app_client):
     client, repo = app_client
     (repo / "foo.py").write_text("x = 1\n", encoding="utf-8")
-    resp = client.get("/api/notes?repo=myrepo&path=foo.py")
+    resp = client.get("/api/notes?path=myrepo/foo.py")
     assert resp.status_code == 200
     body = resp.get_json()
     assert body["mtime"] is None
@@ -623,7 +606,7 @@ def test_get_notes_resolved_lines(app_client):
         "メモ\n"
     )
     (repo / "foo.py.notes.md").write_text(notes, encoding="utf-8")
-    resp = client.get("/api/notes?repo=myrepo&path=foo.py")
+    resp = client.get("/api/notes?path=myrepo/foo.py")
     body = resp.get_json()
     assert len(body["resolved"]) == 1
     sec = body["resolved"][0]
@@ -642,7 +625,7 @@ def test_get_notes_relocates_and_writes_back(app_client):
     )
     notes_path = repo / "foo.py.notes.md"
     notes_path.write_text(notes, encoding="utf-8")
-    resp = client.get("/api/notes?repo=myrepo&path=foo.py")
+    resp = client.get("/api/notes?path=myrepo/foo.py")
     body = resp.get_json()
     assert body["resolved"][0]["anchor"] == {"kind": "lines", "start": 4, "end": 5}
     # File rewritten with new heading
@@ -658,7 +641,7 @@ def test_get_notes_unresolved_lines(app_client):
         "メモ\n"
     )
     (repo / "foo.py.notes.md").write_text(notes, encoding="utf-8")
-    resp = client.get("/api/notes?repo=myrepo&path=foo.py")
+    resp = client.get("/api/notes?path=myrepo/foo.py")
     body = resp.get_json()
     assert body["resolved"] == []
     assert len(body["unresolved"]) == 1
@@ -673,7 +656,7 @@ def test_get_notes_md_returns_client_resolve_flag(app_client):
         "メモ\n"
     )
     (repo / "doc.md.notes.md").write_text(notes, encoding="utf-8")
-    resp = client.get("/api/notes?repo=myrepo&path=doc.md")
+    resp = client.get("/api/notes?path=myrepo/doc.md")
     body = resp.get_json()
     assert body["kind"] == "md_sentence"
     assert body["resolved"][0]["client_resolve"] is True
@@ -689,7 +672,7 @@ def test_delete_notes_removes_section(app_client):
     )
     notes_path.write_text(initial, encoding="utf-8")
     payload = {
-        "repo": "myrepo", "path": "foo.py",
+        "path": "myrepo/foo.py",
         "if_match_mtime": notes_path.stat().st_mtime,
         "anchor": {"kind": "lines", "start": 1, "end": 1},
     }
@@ -706,7 +689,7 @@ def test_delete_last_section_removes_file(app_client):
     notes_path = repo / "foo.py.notes.md"
     notes_path.write_text("## L1\nbody\n", encoding="utf-8")
     payload = {
-        "repo": "myrepo", "path": "foo.py",
+        "path": "myrepo/foo.py",
         "if_match_mtime": notes_path.stat().st_mtime,
         "anchor": {"kind": "lines", "start": 1, "end": 1},
     }
@@ -722,7 +705,7 @@ def test_delete_notes_mtime_conflict(app_client):
     notes_path = repo / "foo.py.notes.md"
     notes_path.write_text("## L1\nbody\n", encoding="utf-8")
     payload = {
-        "repo": "myrepo", "path": "foo.py",
+        "path": "myrepo/foo.py",
         "if_match_mtime": 0.0,
         "anchor": {"kind": "lines", "start": 1, "end": 1},
     }
@@ -741,7 +724,7 @@ def test_relocate_md_section(app_client):
     )
     notes_path.write_text(initial, encoding="utf-8")
     payload = {
-        "repo": "myrepo", "path": "doc.md",
+        "path": "myrepo/doc.md",
         "if_match_mtime": notes_path.stat().st_mtime,
         "old_anchor": {"kind": "md_sentence", "index": 5},
         "new_anchor": {"kind": "md_sentence", "index": 3},
@@ -761,7 +744,7 @@ def test_relocate_section_not_found(app_client):
     notes_path = repo / "doc.md.notes.md"
     notes_path.write_text("## S1\nbody\n", encoding="utf-8")
     payload = {
-        "repo": "myrepo", "path": "doc.md",
+        "path": "myrepo/doc.md",
         "if_match_mtime": notes_path.stat().st_mtime,
         "old_anchor": {"kind": "md_sentence", "index": 99},
         "new_anchor": {"kind": "md_sentence", "index": 1},
@@ -773,7 +756,7 @@ def test_relocate_section_not_found(app_client):
 
 def test_notes_index_empty(app_client):
     client, repo = app_client
-    resp = client.get("/api/notes/index?repo=myrepo&path=")
+    resp = client.get("/api/notes/index?path=myrepo")
     assert resp.status_code == 200
     assert resp.get_json() == {"files": {}}
 
@@ -786,14 +769,14 @@ def test_notes_index_counts_sections(app_client):
         "## L1\nx\n## Unresolved\n### L99\nz\n", encoding="utf-8")
     (repo / "sub").mkdir()
     (repo / "sub" / "c.py.notes.md").write_text("## L1\nx\n", encoding="utf-8")
-    resp = client.get("/api/notes/index?repo=myrepo&path=")
+    resp = client.get("/api/notes/index?path=myrepo")
     body = resp.get_json()
     assert body["files"] == {"a.py": 2, "b.py": 2}  # only top-level
-    resp2 = client.get("/api/notes/index?repo=myrepo&path=sub")
+    resp2 = client.get("/api/notes/index?path=myrepo/sub")
     assert resp2.get_json()["files"] == {"c.py": 1}
 
 
-from notes import (
+from explorer.notes import (
     RESOLUTION_STATUSES,
     count_sections_by_status,
     get_resolution,
