@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Git Viewer</title>
+  <title>Pi Explorer</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="{{ asset('style.css') }}">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
@@ -31,7 +31,7 @@
 <div class="content" id="content"></div>
 
 <script>
-const ROOT_DIR = {{ code_dir|tojson }};
+const ROOT_DIR = {{ root_dir|tojson }};
 const ROOT_NAME = {{ root_name|tojson }};
 </script>
 <script src="{{ asset('js/core.js') }}"></script>

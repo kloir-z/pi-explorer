@@ -182,7 +182,7 @@ def keep_awake():
     client_id = data.get("client_id", "")
     if not re.fullmatch(r"[A-Za-z0-9-]{1,64}", client_id):
         abort(400)
-    session_id = f"git-viewer-{client_id}"
+    session_id = f"pi-explorer-{client_id}"
     payload = json.dumps({"session_id": session_id}).encode("utf-8")
     creationflags = (
         subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP

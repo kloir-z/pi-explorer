@@ -11,7 +11,7 @@ def app_client(tmp_path, monkeypatch):
     """Flask test client whose ROOT is tmp_path; files live under tmp_path/myrepo."""
     repo = tmp_path / "myrepo"
     repo.mkdir()
-    monkeypatch.setenv("GIT_VIEWER_CODE_DIR", str(tmp_path))
+    monkeypatch.setenv("PI_EXPLORER_ROOT", str(tmp_path))
     # ROOT is resolved at import time, so drop cached modules to pick up the env.
     for name in [m for m in sys.modules if m == "explorer" or m.startswith("explorer.")]:
         del sys.modules[name]

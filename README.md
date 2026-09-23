@@ -1,39 +1,45 @@
-# Git Viewer
+# Pi Explorer
 
-Read-only web UI for browsing git repositories. Built for Raspberry Pi but works on any Linux machine.
+Web file explorer and media player for a local folder tree. Built for Raspberry Pi, also runs as a Windows service.
 
 ## Features
 
-- **Overview** -- branch, changes, remote status, recent commits at a glance
-- **Log** -- commit history with inline diff expansion (line-by-line / side-by-side toggle)
-- **Diff** -- uncommitted changes with word-level highlighting (diff2html)
-- **Files** -- working tree browser with syntax highlighting (highlight.js), Markdown rendering (marked.js), image/PDF/audio preview, SRT subtitle rendering (speaker-colored cue cards)
-- **Listen** -- cross-project dashboard of every `output.mp3` under the repo, aggregating the per-file playback logs into listened coverage % (union of played spans) + furthest-reach %, grouped by parent folder (collapsible) and sortable, with unlistened/in-progress/done filters and last-played times; click a row to jump straight to its player
+- **Files** -- browse any folder under the root with per-folder sort, favorites, and preview of code (highlight.js), Markdown (marked.js, Mermaid), HTML (rendered in an iframe), images (incl. HEIC), PDF, audio and video. Text files can be edited in place.
+- **Player** -- audio/video with synced SRT subtitles (speaker-colored cue cards), a chapter index from a sibling `chapters.json`, autoplay / continuous play, and a per-file playback log.
+- **Reading aids** -- bookmarks on Markdown sentences, SRT cues and code lines; per-file notes stored as a sidecar `<file>.notes.md`.
+- **Listen** -- dashboard of every `output.mp3` under the folder open in Files, aggregating playback logs into listened coverage % (union of played spans) and furthest-reach %, grouped by parent folder, with unlistened/in-progress/done filters.
 
 ## Setup
 
 ```bash
-pip install -r requirements.txt  # flask>=3.0
+pip install -r requirements.txt
 python app.py                    # http://localhost:5125
 ```
 
-By default it scans all git repos under `/home/user/code/`. To point at a different directory, either:
+The served root defaults to `/home/user/code/`. To change it, either:
 
-- Set the `GIT_VIEWER_CODE_DIR` environment variable, or
-- Copy `config.local.json.example` to `config.local.json` and edit `code_dir` (gitignored, per-machine).
+- set the `PI_EXPLORER_ROOT` environment variable, or
+- copy `config.local.json.example` to `config.local.json` and edit `root_dir` (gitignored, per-machine).
 
-The environment variable takes precedence over the config file.
+The environment variable wins. The older names `GIT_VIEWER_CODE_DIR` / `code_dir` are still honored.
 
-### systemd (optional)
+Favorites, bookmarks and navigation settings are stored in `data/` (gitignored).
+
+### systemd (Raspberry Pi)
 
 ```bash
-sudo cp git-viewer.service /etc/systemd/system/
-sudo systemctl enable --now git-viewer.service
+sudo cp pi-explorer.service /etc/systemd/system/
+sudo systemctl enable --now pi-explorer.service
 ```
 
-## Stack
+### Windows service
 
-- Python / Flask (backend, ~200 lines)
-- Vanilla JS SPA (frontend, single index.html)
-- diff2html, highlight.js, marked.js (CDN)
-- GitHub Dark theme
+From an elevated PowerShell: `scripts/install-deps.ps1`, then `scripts/install-service.ps1` (NSSM). Re-run `install-service.ps1` after moving the checkout.
+
+## Layout
+
+- `app.py` -- entry point
+- `explorer/` -- Flask app: `files`, `prefs`, `player`, `notes_api` blueprints; `paths` (containment checks), `store` (JSON state), `notes` (notes file format)
+- `templates/index.html` -- page shell
+- `static/js/` -- vanilla JS, one file per area, loaded in order
+- `static/style.css` -- GitHub Dark theme

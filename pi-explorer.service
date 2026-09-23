@@ -1,12 +1,12 @@
 [Unit]
-Description=Git Viewer
+Description=Pi Explorer
 After=network.target
 
 [Service]
 Type=simple
 User=user
-WorkingDirectory=/home/user/code/git_viewer
-ExecStart=/usr/bin/python3 /home/user/code/git_viewer/app.py
+WorkingDirectory=/home/user/code/pi-explorer
+ExecStart=/usr/bin/python3 /home/user/code/pi-explorer/app.py
 Restart=on-failure
 RestartSec=5
 Environment=FLASK_ENV=production

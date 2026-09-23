@@ -29,6 +29,6 @@ def create_app() -> Flask:
 
     @app.route("/")
     def index():
-        return render_template("index.html", code_dir=str(ROOT), root_name=ROOT.name or str(ROOT))
+        return render_template("index.html", root_dir=str(ROOT), root_name=ROOT.name or str(ROOT))
 
     return app

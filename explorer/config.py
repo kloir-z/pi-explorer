@@ -18,12 +18,14 @@ def load_config() -> dict:
         return {}
 
 
-def load_code_dir(config: dict) -> Path:
-    env_value = os.environ.get("GIT_VIEWER_CODE_DIR")
-    if env_value:
-        return Path(env_value)
-    if config.get("code_dir"):
-        return Path(config["code_dir"])
+def load_root(config: dict) -> Path:
+    """The folder to serve. The git-viewer era names still work as fallbacks."""
+    for var in ("PI_EXPLORER_ROOT", "GIT_VIEWER_CODE_DIR"):
+        if os.environ.get(var):
+            return Path(os.environ[var])
+    for key in ("root_dir", "code_dir"):
+        if config.get(key):
+            return Path(config[key])
     return Path("/home/user/code")
 
 
@@ -39,5 +41,5 @@ def load_keep_awake_script(config: dict):
 
 CONFIG = load_config()
 # Resolved once so every containment check compares against the same string.
-ROOT = load_code_dir(CONFIG).resolve()
+ROOT = load_root(CONFIG).resolve()
 KEEP_AWAKE_SCRIPT = load_keep_awake_script(CONFIG)

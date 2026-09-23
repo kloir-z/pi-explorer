@@ -11,7 +11,7 @@ def contained(child: Path, root: Path) -> bool:
     """True if child is root itself or lies underneath it.
 
     A bare str.startswith() accepts a sibling whose name merely extends the
-    root's -- 'C:/code/git-viewer-EVIL'.startswith('C:/code/git-viewer') is
+    root's -- 'C:/code/app-EVIL'.startswith('C:/code/app') is
     True -- so the separator has to take part in the comparison.
     """
     child_s, root_s = str(child), str(root)

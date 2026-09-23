@@ -1,11 +1,13 @@
 #Requires -RunAsAdministrator
-# Installs git-viewer as a Windows service via NSSM.
-# Run from an elevated PowerShell.
+# Installs pi-explorer as a Windows service via NSSM, replacing the legacy
+# git-viewer service if present. Run from an elevated PowerShell; re-run it
+# after moving/renaming the checkout so the service points at the new path.
 
 $ErrorActionPreference = 'Stop'
 
-$ServiceName = 'git-viewer'
-$RepoDir     = 'C:\code\git-viewer'
+$ServiceName = 'pi-explorer'
+$LegacyName  = 'git-viewer'
+$RepoDir     = Split-Path -Parent $PSScriptRoot
 $PythonExe   = 'C:\Python314\python.exe'
 $AppScript   = Join-Path $RepoDir 'app.py'
 $LogDir      = Join-Path $RepoDir 'logs'
@@ -34,18 +36,20 @@ if (-not $nssm) {
 Write-Host "      nssm: $nssm"
 
 Write-Host "[2/5] Removing existing service if present..."
-$existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-if ($existing) {
-    if ($existing.Status -ne 'Stopped') { & $nssm stop $ServiceName | Out-Null }
-    & $nssm remove $ServiceName confirm | Out-Null
-    Start-Sleep -Seconds 1
+foreach ($name in @($LegacyName, $ServiceName)) {
+    $existing = Get-Service -Name $name -ErrorAction SilentlyContinue
+    if ($existing) {
+        if ($existing.Status -ne 'Stopped') { & $nssm stop $name | Out-Null }
+        & $nssm remove $name confirm | Out-Null
+        Start-Sleep -Seconds 1
+    }
 }
 
 Write-Host "[3/5] Installing service..."
 & $nssm install $ServiceName $PythonExe $AppScript
 & $nssm set $ServiceName AppDirectory $RepoDir
-& $nssm set $ServiceName DisplayName 'Git Viewer'
-& $nssm set $ServiceName Description 'Read-only web UI for browsing local git repositories (port 5125)'
+& $nssm set $ServiceName DisplayName 'Pi Explorer'
+& $nssm set $ServiceName Description 'Web file explorer and media player for a local folder tree (port 5125)'
 & $nssm set $ServiceName Start SERVICE_AUTO_START
 & $nssm set $ServiceName AppStdout (Join-Path $LogDir 'service.stdout.log')
 & $nssm set $ServiceName AppStderr (Join-Path $LogDir 'service.stderr.log')

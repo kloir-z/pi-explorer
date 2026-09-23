@@ -1,6 +1,7 @@
 #Requires -RunAsAdministrator
 $ErrorActionPreference = 'Stop'
-$LogDir = 'C:\code\git-viewer\logs'
+$ServiceName = 'pi-explorer'
+$LogDir = Join-Path (Split-Path -Parent $PSScriptRoot) 'logs'
 if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir | Out-Null }
 Start-Transcript -Path (Join-Path $LogDir 'restart.log') -Force | Out-Null
 trap { Write-Host "ERROR: $_"; Stop-Transcript | Out-Null; exit 1 }
@@ -18,13 +19,13 @@ if (-not $nssm) {
 Write-Host "nssm: $nssm"
 
 # Stop/reset/start to clear the Paused state.
-$svc = Get-Service -Name 'git-viewer' -ErrorAction SilentlyContinue
+$svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($svc -and $svc.Status -ne 'Stopped') {
-    & $nssm stop git-viewer
+    & $nssm stop $ServiceName
 }
 Start-Sleep -Seconds 1
-& $nssm start git-viewer
+& $nssm start $ServiceName
 
 Start-Sleep -Seconds 2
-Get-Service -Name 'git-viewer' | Format-List Name, Status, StartType
+Get-Service -Name $ServiceName | Format-List Name, Status, StartType
 Stop-Transcript | Out-Null

@@ -1,4 +1,4 @@
-"""Entry point: `python app.py` serves the explorer on port 5125."""
+"""Entry point: `python app.py` serves Pi Explorer on port 5125."""
 from explorer import create_app
 
 app = create_app()
