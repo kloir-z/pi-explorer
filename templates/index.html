@@ -1865,6 +1865,9 @@ async function showBlob(path) {
       </div>`;
     wireAutoplayToggle();
     wireContinuousToggle();
+    const audioPlayer = document.getElementById('audio-player');
+    audioPlayer.defaultPlaybackRate = 1.2;
+    audioPlayer.playbackRate = 1.2;
     setupAudioContinuous();
     setupPlaybackLog(path);
     setupChapterNav(path);
